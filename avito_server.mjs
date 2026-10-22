@@ -1,0 +1,117 @@
+#!/usr/bin/env node
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
+import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
+import { z } from "zod";
+import { searchAvito, getItemDetails, sendMessage, getChatHistory, listChats, closeBrowser } from "./avito_core.mjs";
+
+const log = (...args) => console.error("[avito-mcp]", ...args);
+
+const server = new McpServer({
+  name: "avito-mcp-server",
+  version: "1.0.0"
+});
+
+function wrapTool(name, fn) {
+  return async (args) => {
+    try {
+      const res = await fn(args);
+      return {
+        content: [{ type: "text", text: JSON.stringify(res, null, 2) }]
+      };
+    } catch (err) {
+      log(`${name} error:`, err?.message);
+      return {
+        content: [{ type: "text", text: `Error: ${err?.message || String(err)}` }],
+        isError: true
+      };
+    }
+  };
+}
+
+server.registerTool(
+  "avito_search",
+  {
+    title: "Search Avito listings",
+    description: "Search for listings on Avito by query, location, price range and sort order.",
+    inputSchema: {
+      query: z.string().describe("Search query, e.g. 'iphone 15 pro', 'rtx 4070'"),
+      location: z.string().default("all").describe("City or region, e.g. 'moskva', 'sankt-peterburg', 'all'"),
+      price_min: z.number().int().nonnegative().optional().describe("Minimum price in RUB"),
+      price_max: z.number().int().nonnegative().optional().describe("Maximum price in RUB"),
+      sort: z.enum(["default", "price_asc", "price_desc", "date"]).default("default").describe("Sort order"),
+      limit: z.number().int().min(1).max(30).default(10).describe("Max results to return")
+    }
+  },
+  wrapTool("avito_search", searchAvito)
+);
+
+server.registerTool(
+  "avito_get_item_details",
+  {
+    title: "Get Avito item details",
+    description: "Get full details of an Avito listing: title, price, description, seller rating/reviews, parameters, delivery status and messaging capability.",
+    inputSchema: {
+      url: z.string().describe("Full URL of the listing or item ID")
+    }
+  },
+  wrapTool("avito_get_item_details", getItemDetails)
+);
+
+server.registerTool(
+  "avito_send_message",
+  {
+    title: "Send message to Avito seller",
+    description: "Send a message to a seller on Avito to negotiate or ask questions. Requires prior login via login_avito.js.",
+    inputSchema: {
+      url: z.string().describe("Item URL or direct chat URL"),
+      message: z.string().describe("Text of the message to send")
+    }
+  },
+  wrapTool("avito_send_message", sendMessage)
+);
+
+server.registerTool(
+  "avito_list_chats",
+  {
+    title: "List Avito messenger chats",
+    description: "List recent chats from the user's Avito messenger. Requires prior login.",
+    inputSchema: {
+      limit: z.number().int().min(1).max(20).default(10).describe("Max chats to return")
+    }
+  },
+  wrapTool("avito_list_chats", listChats)
+);
+
+server.registerTool(
+  "avito_get_chat_history",
+  {
+    title: "Get chat messages with Avito seller",
+    description: "Read message history in an active Avito chat to check seller responses.",
+    inputSchema: {
+      chat_url: z.string().optional().describe("URL of the specific chat or empty for active chat"),
+      limit: z.number().int().min(1).max(30).default(15).describe("Max messages to return")
+    }
+  },
+  wrapTool("avito_get_chat_history", getChatHistory)
+);
+
+let shuttingDown = false;
+async function cleanup() {
+  if (shuttingDown) return;
+  shuttingDown = true;
+  log("server shutting down, closing browser...");
+  await closeBrowser();
+  process.exit(0);
+}
+
+process.on("SIGINT", cleanup);
+process.on("SIGTERM", cleanup);
+process.on("uncaughtException", (err) => {
+  log("uncaughtException:", err);
+  cleanup();
+});
+
+const transport = new StdioServerTransport();
+transport.onclose = cleanup;
+await server.connect(transport);
+log("avito-mcp-server ready on stdio");

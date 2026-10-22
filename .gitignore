@@ -1,0 +1,8 @@
+node_modules/
+avito-data/
+*.log
+storageState.json
+.env
+.env.local
+.DS_Store
+Thumbs.db

@@ -1,0 +1,26 @@
+{
+  "name": "avito-mcp-server",
+  "version": "1.0.0",
+  "description": "Model Context Protocol (MCP) server for Avito: search listings, view details, chat with sellers and negotiate deals",
+  "main": "avito_server.mjs",
+  "type": "module",
+  "scripts": {
+    "start": "node avito_server.mjs",
+    "login": "node login_avito.js"
+  },
+  "keywords": [
+    "mcp",
+    "model-context-protocol",
+    "avito",
+    "ai-agent",
+    "automation",
+    "playwright"
+  ],
+  "author": "foorsee",
+  "license": "MIT",
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.6.0",
+    "playwright-core": "^1.40.0",
+    "zod": "^3.22.0"
+  }
+}

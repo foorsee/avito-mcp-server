@@ -1,0 +1,358 @@
+import { chromium } from "playwright-core";
+import path from "path";
+import fs from "fs";
+import { fileURLToPath } from "url";
+
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
+const log = (...args) => console.error("[avito-core]", ...args);
+const DATA_DIR = process.env.AVITO_DATA_DIR || path.join(__dirname, "avito-data");
+if (!fs.existsSync(DATA_DIR)) {
+  fs.mkdirSync(DATA_DIR, { recursive: true });
+}
+
+let context = null;
+let activePage = null;
+let idleTimer = null;
+const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
+let requestLock = Promise.resolve();
+
+function resetIdle() {
+  clearTimeout(idleTimer);
+  idleTimer = setTimeout(async () => {
+    log("idle timeout - closing browser context to free RAM");
+    await closeBrowser().catch(() => {});
+  }, IDLE_TIMEOUT_MS);
+  idleTimer.unref?.();
+}
+
+export async function getBrowserContext() {
+  if (context) return context;
+  log("launching persistent browser context...");
+  const launchArgs = [
+    "--disable-blink-features=AutomationControlled",
+    "--no-first-run",
+    "--no-default-browser-check",
+    "--window-position=-3000,-3000",
+    "--window-size=1280,800",
+    "--disable-gpu",
+    "--disable-dev-shm-usage"
+  ];
+
+  try {
+    context = await chromium.launchPersistentContext(DATA_DIR, {
+      headless: false,
+      channel: "chrome",
+      args: launchArgs,
+      viewport: { width: 1280, height: 800 },
+      locale: "ru-RU"
+    });
+  } catch (err) {
+    log("falling back to msedge:", err.message);
+    try {
+      context = await chromium.launchPersistentContext(DATA_DIR, {
+        headless: false,
+        channel: "msedge",
+        args: launchArgs,
+        viewport: { width: 1280, height: 800 },
+        locale: "ru-RU"
+      });
+    } catch (e) {
+      log("falling back to default chromium:", e.message);
+      context = await chromium.launchPersistentContext(DATA_DIR, {
+        headless: false,
+        args: launchArgs,
+        viewport: { width: 1280, height: 800 },
+        locale: "ru-RU"
+      });
+    }
+  }
+
+  context.on("close", () => {
+    log("browser context closed");
+    context = null;
+    activePage = null;
+  });
+
+  return context;
+}
+
+export async function getPage() {
+  const ctx = await getBrowserContext();
+  if (!activePage || activePage.isClosed()) {
+    activePage = ctx.pages().length > 0 ? ctx.pages()[0] : await ctx.newPage();
+    await activePage.addInitScript(() => {
+      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+    });
+  }
+  return activePage;
+}
+
+export async function closeBrowser() {
+  if (context) {
+    await context.close().catch(() => {});
+    context = null;
+    activePage = null;
+  }
+}
+
+async function executeWithLock(fn) {
+  resetIdle();
+  const prevLock = requestLock;
+  let resolveLock;
+  requestLock = new Promise((res) => {
+    resolveLock = res;
+  });
+
+  try {
+    await prevLock;
+    return await fn();
+  } finally {
+    resolveLock();
+    resetIdle();
+  }
+}
+
+async function handleChallenge(page, maxWaitMs = 15000) {
+  const startTime = Date.now();
+  while (Date.now() - startTime < maxWaitMs) {
+    const title = await page.title().catch(() => "");
+    if (!title.includes("Доступ ограничен") && !title.includes("проверка безопасности")) {
+      return true;
+    }
+    log("waiting for challenge redirect, title:", title);
+    await page.waitForTimeout(1500);
+  }
+  return false;
+}
+
+export async function searchAvito({ query, location = "all", price_min, price_max, sort = "default", limit = 10 }) {
+  return executeWithLock(async () => {
+    const page = await getPage();
+    let loc = location.toLowerCase().trim();
+    if (loc === "россия" || loc === "все" || loc === "всей россии") loc = "all";
+    if (loc === "москва") loc = "moskva";
+    if (loc === "питер" || loc === "санкт-петербург") loc = "sankt-peterburg";
+
+    const params = new URLSearchParams();
+    params.set("q", query);
+    if (price_min !== undefined) params.set("pmin", String(price_min));
+    if (price_max !== undefined) params.set("pmax", String(price_max));
+    if (sort === "price_asc") params.set("s", "1");
+    if (sort === "price_desc") params.set("s", "2");
+    if (sort === "date") params.set("s", "104");
+
+    const targetUrl = `https://www.avito.ru/${encodeURIComponent(loc)}?${params.toString()}`;
+    log("navigating to search:", targetUrl);
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await handleChallenge(page);
+
+    await page.waitForSelector('[data-marker="item"]', { timeout: 8000 }).catch(() => {});
+
+    const items = await page.$$eval('[data-marker="item"]', (els, max) => {
+      return els.slice(0, max).map((el) => {
+        const titleEl = el.querySelector('[data-marker="item-title"]');
+        const priceEl = el.querySelector('[data-marker="item-price"]');
+        const linkEl = el.querySelector('a[data-marker="item-title"]') || el.querySelector('a');
+        const descEl = el.querySelector('[class*="description"]');
+        const geoEl = el.querySelector('[class*="geo"]');
+        const dateEl = el.querySelector('[data-marker="item-date"]') || el.querySelector('[class*="date"]');
+
+        const title = titleEl ? titleEl.innerText.trim() : (linkEl ? linkEl.getAttribute("title") || "" : "");
+        const price = priceEl ? priceEl.innerText.trim() : "";
+        const href = linkEl ? linkEl.getAttribute("href") : "";
+        const url = href ? (href.startsWith("http") ? href : `https://www.avito.ru${href}`) : "";
+        const location = geoEl ? geoEl.innerText.trim().replace(/\s+/g, " ") : "";
+        const description = descEl ? descEl.innerText.trim() : "";
+        const date = dateEl ? dateEl.innerText.trim() : "";
+        const id = el.getAttribute("data-item-id") || (url.match(/_(\d+)(\?|$)/) ? url.match(/_(\d+)(\?|$)/)[1] : "");
+
+        const text = el.innerText || "";
+        const isReserved = text.includes("Товар зарезервирован") || text.includes("Зарезервировано");
+        const hasDelivery = text.includes("Доставка") || !!el.querySelector('[data-marker*="delivery"]');
+
+        return { id, title, price, url, location, description, date, is_reserved: isReserved, has_delivery: hasDelivery };
+      });
+    }, limit);
+
+    return {
+      query,
+      location: loc,
+      count: items.length,
+      items
+    };
+  });
+}
+
+export async function getItemDetails({ url }) {
+  return executeWithLock(async () => {
+    const page = await getPage();
+    let targetUrl = url;
+    if (/^\d+$/.test(url.trim())) {
+      targetUrl = `https://www.avito.ru/${url.trim()}`;
+    }
+    log("fetching item details:", targetUrl);
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await handleChallenge(page);
+
+    await page.waitForTimeout(2000);
+
+    const title = await page.$eval('[data-marker="item-view/title-info"]', el => el.innerText.trim()).catch(async () => page.title());
+    const price = await page.$eval('[data-marker="item-view/item-price"]', el => el.innerText.trim()).catch(() => "");
+    const description = await page.$eval('[data-marker="item-view/item-description"]', el => el.innerText.trim()).catch(() => "");
+    const sellerName = await page.$eval('[data-marker="seller-info/name"]', el => el.innerText.trim()).catch(() => "");
+    const sellerLabel = await page.$eval('[data-marker="seller-info/label"]', el => el.innerText.trim()).catch(() => "");
+    const sellerScore = await page.$eval('[data-marker*="rating"] [class*="score"], [data-marker="seller-rating/score"]', el => el.innerText.trim()).catch(() => "");
+    const sellerSummary = await page.$eval('[data-marker*="rating"] [class*="summary"], [data-marker="seller-rating/summary"]', el => el.innerText.trim()).catch(() => "");
+    const address = await page.$eval('[itemprop="address"]', el => el.innerText.trim()).catch(() => "");
+
+    const params = await page.$$eval('[data-marker*="item-view/item-params"] li, [class*="params-paramsList"] li', els =>
+      els.map(el => el.innerText.trim().replace(/\s+/g, " "))
+    ).catch(() => []);
+
+    const bodyText = await page.innerText("body").catch(() => "");
+    const isReserved = bodyText.includes("Товар зарезервирован") || bodyText.includes("Зарезервировано");
+    const hasDelivery = bodyText.includes("Купить с доставкой") || bodyText.includes("Авито Доставка") || (await page.$('[data-marker*="delivery"]').then(el => !!el).catch(() => false));
+
+    const hasMessageButton = await page.$('[data-marker*="messenger-button"], button:has-text("Написать"), a:has-text("Написать")').then(el => !!el).catch(() => false);
+
+    return {
+      url: page.url(),
+      title,
+      price,
+      is_reserved: isReserved,
+      has_delivery: hasDelivery,
+      address,
+      description,
+      params,
+      seller: {
+        name: sellerName,
+        label: sellerLabel,
+        rating: sellerScore,
+        summary: sellerSummary
+      },
+      can_message: hasMessageButton
+    };
+  });
+}
+
+export async function sendMessage({ url, message }) {
+  return executeWithLock(async () => {
+    const page = await getPage();
+    log("opening item or chat to send message:", url);
+    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await handleChallenge(page);
+    await page.waitForTimeout(2500);
+
+    const messageBtn = await page.$('[data-marker="messenger-button/link"], button:has-text("Написать"), a:has-text("Написать")');
+    if (messageBtn) {
+      log("clicking messenger button on item page...");
+      await messageBtn.click();
+      await page.waitForTimeout(3000);
+      await handleChallenge(page);
+    }
+
+    if (page.url().includes("#login") || page.url().includes("/login")) {
+      throw new Error("Необходима авторизация в аккаунте Авито! Запустите login_avito.js для входа.");
+    }
+
+    const inputSelector = 'textarea[data-marker*="reply-input"], textarea[data-marker*="message"], [contenteditable="true"], textarea';
+    const inputEl = await page.waitForSelector(inputSelector, { timeout: 10000 }).catch(() => null);
+    if (!inputEl) {
+      throw new Error("Поле ввода сообщения в чате не найдено. Возможно, продавец отключил сообщения или страница не загрузилась.");
+    }
+
+    log("typing message...");
+    await inputEl.click();
+    await inputEl.fill(message);
+    await page.waitForTimeout(800);
+
+    const sendBtn = await page.$('button[data-marker*="send"], button[type="submit"]');
+    if (sendBtn) {
+      await sendBtn.click();
+    } else {
+      await inputEl.press("Enter");
+    }
+
+    await page.waitForTimeout(2000);
+    log("message sent successfully");
+
+    return {
+      status: "success",
+      chat_url: page.url(),
+      sent_message: message
+    };
+  });
+}
+
+export async function getChatHistory({ chat_url, limit = 15 }) {
+  return executeWithLock(async () => {
+    const page = await getPage();
+    const targetUrl = chat_url || "https://www.avito.ru/profile/messenger";
+    log("navigating to chat:", targetUrl);
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await handleChallenge(page);
+    await page.waitForTimeout(3000);
+
+    if (page.url().includes("#login") || page.url().includes("/login")) {
+      throw new Error("Необходима авторизация в аккаунте Авито! Запустите login_avito.js для входа.");
+    }
+
+    const messages = await page.$$eval('[data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]', (els, max) => {
+      return els.slice(-max).map((el) => {
+        const textEl = el.querySelector('[class*="text"], [data-marker*="message-text"]') || el;
+        const timeEl = el.querySelector('[class*="time"], [data-marker*="message-time"]');
+        const isMe = el.className.includes("out") || el.getAttribute("data-is-out") === "true";
+        return {
+          sender: isMe ? "me" : "seller",
+          text: textEl ? textEl.innerText.trim() : "",
+          time: timeEl ? timeEl.innerText.trim() : ""
+        };
+      });
+    }, limit);
+
+    return {
+      chat_url: page.url(),
+      title: await page.title(),
+      messages_count: messages.length,
+      messages
+    };
+  });
+}
+
+export async function listChats({ limit = 10 }) {
+  return executeWithLock(async () => {
+    const page = await getPage();
+    log("navigating to messenger chat list...");
+    await page.goto("https://www.avito.ru/profile/messenger", { waitUntil: "domcontentloaded", timeout: 45000 });
+    await handleChallenge(page);
+    await page.waitForTimeout(3000);
+
+    if (page.url().includes("#login") || page.url().includes("/login")) {
+      throw new Error("Необходима авторизация в аккаунте Авито! Запустите login_avito.js для входа.");
+    }
+
+    const chats = await page.$$eval('[data-marker*="channel-item"], [class*="channel-item"]', (els, max) => {
+      return els.slice(0, max).map((el) => {
+        const titleEl = el.querySelector('[class*="title"], [data-marker*="title"]');
+        const snippetEl = el.querySelector('[class*="snippet"], [data-marker*="snippet"]');
+        const unreadEl = el.querySelector('[class*="unread"]');
+        const linkEl = el.querySelector("a") || el;
+        const href = linkEl.getAttribute("href") || "";
+
+        return {
+          chat_url: href ? (href.startsWith("http") ? href : `https://www.avito.ru${href}`) : "",
+          title: titleEl ? titleEl.innerText.trim() : "",
+          last_message: snippetEl ? snippetEl.innerText.trim() : "",
+          has_unread: !!unreadEl
+        };
+      });
+    }, limit);
+
+    return {
+      count: chats.length,
+      chats
+    };
+  });
+}
