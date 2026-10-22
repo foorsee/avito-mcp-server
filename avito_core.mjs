@@ -67,13 +67,10 @@ export async function getBrowserContext() {
       }).catch(() => {});
 
       // In CDP mode, Chrome already manages its profile SQLite cookies.
-      // Only import from storageState.json if profile cookie DB doesn't exist yet.
-      const hasProfileCookies =
-        fs.existsSync(path.join(DATA_DIR, "Default", "Network", "Cookies")) ||
-        fs.existsSync(path.join(DATA_DIR, "Default", "Cookies"));
-
-      const storagePath = getStorageStatePath(DATA_DIR);
-      if (!hasProfileCookies) {
+      // Only import from storageState.json if profile currently has no Avito cookies.
+      const existingCookies = await ctx.cookies(["https://www.avito.ru"]).catch(() => []);
+      if (existingCookies.length === 0) {
+        const storagePath = getStorageStatePath(DATA_DIR);
         await restoreCookies(ctx, storagePath);
       }
 
@@ -430,7 +427,7 @@ export async function sendMessage({ url, message }) {
           }
           return count > beforeCount;
         },
-        { target: normMessage, beforeCount },
+        { target: normMessage, beforeCount: countBefore },
         { timeout: 12000 }
       )
       .catch(() => false);
@@ -472,8 +469,15 @@ export async function listChats({ limit = 10 }) {
         let href = linkEl.getAttribute("href") || "";
         if (href) {
           try {
-            href = new URL(href, "https://www.avito.ru").toString();
-          } catch (_) {}
+            const resolved = new URL(href, "https://www.avito.ru");
+            if (resolved.protocol === "https:" && (resolved.hostname === "avito.ru" || resolved.hostname.endsWith(".avito.ru"))) {
+              href = resolved.toString();
+            } else {
+              href = "";
+            }
+          } catch (_) {
+            href = "";
+          }
         }
 
         return {

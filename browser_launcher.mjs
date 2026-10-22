@@ -93,10 +93,6 @@ export function checkProfileLock(dataDir) {
   return { isLocked: false };
 }
 
-export function cleanStaleLocks(dir) {
-  return checkProfileLock(dir);
-}
-
 export function findSystemChromePath() {
   // Support AVITO_CHROME_PATH, CHROME_PATH, and PUPPETEER_EXECUTABLE_PATH
   const explicitPath =
@@ -297,13 +293,10 @@ export async function launchPersistentBrowser({ isLogin = false } = {}) {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
   });
 
-  // Only restore from storageState.json if the persistent profile DB is fresh / doesn't have cookies yet
+  // Only restore from storageState.json if profile currently has no Avito cookies
   // This prevents overwriting fresh session cookies with an older snapshot
-  const hasProfileCookies =
-    fs.existsSync(path.join(dataDir, "Default", "Network", "Cookies")) ||
-    fs.existsSync(path.join(dataDir, "Default", "Cookies"));
-
-  if (!hasProfileCookies) {
+  const existingCookies = await context.cookies(["https://www.avito.ru"]).catch(() => []);
+  if (existingCookies.length === 0) {
     await restoreCookies(context, storagePath);
   }
 
