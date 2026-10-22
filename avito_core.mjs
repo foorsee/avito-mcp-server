@@ -225,6 +225,10 @@ export async function searchAvito({ query, location = "all", price_min, price_ma
     if (loc === "россия" || loc === "все" || loc === "всей россии") loc = "all";
     if (loc === "москва") loc = "moskva";
     if (loc === "питер" || loc === "санкт-петербург") loc = "sankt-peterburg";
+    if (loc === "крым" || loc === "krym") loc = "respublika_krym";
+    if (loc === "евпатория") loc = "evpatoriya";
+    if (loc === "симферополь") loc = "simferopol";
+    if (loc === "севастополь") loc = "sevastopol";
 
     const encodedLoc = loc.split("/").map(encodeURIComponent).join("/");
 
