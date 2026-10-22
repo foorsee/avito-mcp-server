@@ -626,7 +626,43 @@ export async function getChatHistory({ chat_url, limit = 15 }) {
   });
 }
 
+
+function getDirectorySizeBytes(dirPath) {
+  let size = 0;
+  if (!fs.existsSync(dirPath)) return 0;
+  try {
+    const entries = fs.readdirSync(dirPath, { withFileTypes: true });
+    for (const entry of entries) {
+      const fullPath = path.join(dirPath, entry.name);
+      if (entry.isDirectory()) {
+        size += getDirectorySizeBytes(fullPath);
+      } else if (entry.isFile()) {
+        size += fs.statSync(fullPath).size;
+      }
+    }
+  } catch (_) {}
+  return size;
+}
+
+export function cleanImageCacheIfNeeded(maxBytes = 1024 * 1024 * 1024) {
+  const baseImagesDir = path.join(DATA_DIR, "images");
+  if (!fs.existsSync(baseImagesDir)) return;
+
+  const currentSize = getDirectorySizeBytes(baseImagesDir);
+  if (currentSize >= maxBytes) {
+    log(`images cache exceeded limit (${(currentSize / 1024 / 1024).toFixed(1)} MB >= ${(maxBytes / 1024 / 1024).toFixed(1)} MB), clearing all cached images...`);
+    try {
+      fs.rmSync(baseImagesDir, { recursive: true, force: true });
+      fs.mkdirSync(baseImagesDir, { recursive: true });
+      log("images cache cleared successfully");
+    } catch (err) {
+      log("error clearing images cache:", err.message);
+    }
+  }
+}
+
 export async function downloadItemImages({ url, limit = 5 }) {
+  cleanImageCacheIfNeeded();
   const details = await getItemDetails({ url });
   const itemIdMatch = details.url.match(/_(\d+)(?:\?|$)/) || url.match(/_(\d+)(?:\?|$)/) || url.match(/^(\d+)$/);
   const itemId = itemIdMatch ? itemIdMatch[1] : `item_${Date.now()}`;
