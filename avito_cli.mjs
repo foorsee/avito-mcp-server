@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { searchAvito, getItemDetails, sendMessage, getChatHistory, listChats, closeBrowser } from "./avito_core.mjs";
+import { searchAvito, getItemDetails, downloadItemImages, sendMessage, getChatHistory, listChats, closeBrowser } from "./avito_core.mjs";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -10,6 +10,12 @@ async function run() {
       const pmax = args[1] ? Number(args[1]) : undefined;
       const pmin = args[2] ? Number(args[2]) : undefined;
       const res = await searchAvito({ query, price_max: pmax, price_min: pmin, location: "all", limit: 10 });
+      console.log(JSON.stringify(res, null, 2));
+    } else if (cmd === "images") {
+      const url = args[0];
+      const limit = args[1] ? Number(args[1]) : 5;
+      if (!url) throw new Error("Укажите URL или ID объявления");
+      const res = await downloadItemImages({ url, limit });
       console.log(JSON.stringify(res, null, 2));
     } else if (cmd === "details") {
       const url = args[0];
@@ -33,6 +39,7 @@ async function run() {
       console.log("Использование:");
       console.log("  node avito_cli.mjs search <запрос> [max_price] [min_price]");
       console.log("  node avito_cli.mjs details <url>");
+      console.log("  node avito_cli.mjs images <url> [limit]");
       console.log("  node avito_cli.mjs chats");
       console.log("  node avito_cli.mjs history [chat_url]");
       console.log("  node avito_cli.mjs send <url> <сообщение>");

@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { searchAvito, getItemDetails, sendMessage, getChatHistory, listChats, closeBrowser } from "./avito_core.mjs";
+import { searchAvito, getItemDetails, downloadItemImages, sendMessage, getChatHistory, listChats, closeBrowser } from "./avito_core.mjs";
 
 const log = (...args) => console.error("[avito-mcp]", ...args);
 
@@ -104,6 +104,20 @@ server.registerTool(
   },
   wrapTool("avito_get_chat_history", getChatHistory)
 );
+
+server.registerTool(
+  "avito_download_images",
+  {
+    title: "Download Avito listing photos",
+    description: "Download photos from an Avito listing to local disk for visual AI inspection. Returns array of local file paths and image URLs.",
+    inputSchema: {
+      url: z.string().describe("Item URL or item ID"),
+      limit: z.number().int().min(1).max(10).default(5).describe("Max photos to download (default 5)")
+    }
+  },
+  wrapTool("avito_download_images", downloadItemImages)
+);
+
 
 let shuttingDown = false;
 async function cleanup(exitCode = 0) {

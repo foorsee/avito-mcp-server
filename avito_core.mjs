@@ -263,11 +263,20 @@ export async function searchAvito({ query, location = "all", price_min, price_ma
         const rawId = el.getAttribute("data-item-id") || (urlMatch ? urlMatch[1] : "") || el.getAttribute("id") || "";
         const id = rawId.replace(/^i/, "");
 
+        const imgEl = el.querySelector('img[src*="img.avito.st"], img[data-src*="img.avito.st"], img');
+        let image = "";
+        if (imgEl) {
+          const src = imgEl.currentSrc || imgEl.getAttribute("src") || imgEl.getAttribute("data-src") || "";
+          if (src && !src.startsWith("data:")) {
+            image = src;
+          }
+        }
+
         const text = el.innerText || "";
         const isReserved = text.includes("Товар зарезервирован") || text.includes("Зарезервировано");
         const hasDelivery = text.includes("Доставка") || !!el.querySelector('[data-marker*="delivery"]');
 
-        return { id, title, price, url, location, description, date, is_reserved: isReserved, has_delivery: hasDelivery };
+        return { id, title, price, url, image, location, description, date, is_reserved: isReserved, has_delivery: hasDelivery };
       });
     }, limit);
 
@@ -310,10 +319,48 @@ export async function getItemDetails({ url }) {
 
     const hasMessageButton = await page.$('[data-marker*="messenger-button"], button:has-text("Написать"), a:has-text("Написать")').then(el => !!el).catch(() => false);
 
+    const images = await page.evaluate(() => {
+      const urls = new Set();
+      const imgEls = document.querySelectorAll(
+        '[data-marker*="image-frame"] img, [class*="image-frame"] img, [data-marker*="slider-image"] img, [data-marker*="gallery"] img, [class*="gallery"] img, [data-marker*="image-preview/preview"] img, img[class*="photo"]'
+      );
+      for (const img of imgEls) {
+        const src = img.currentSrc || img.src || img.getAttribute("data-src");
+        if (src && src.includes("img.avito.st")) {
+          urls.add(src);
+        }
+      }
+
+      if (urls.size === 0) {
+        for (const img of document.querySelectorAll("img")) {
+          const src = img.currentSrc || img.src || img.getAttribute("data-src");
+          if (src && src.includes("img.avito.st/image/")) {
+            urls.add(src);
+          }
+        }
+      }
+
+      for (const script of document.querySelectorAll('script[type="application/ld+json"]')) {
+        try {
+          const data = JSON.parse(script.innerText);
+          if (data.image) {
+            if (Array.isArray(data.image)) {
+              data.image.forEach(u => typeof u === "string" && urls.add(u));
+            } else if (typeof data.image === "string") {
+              urls.add(data.image);
+            }
+          }
+        } catch (_) {}
+      }
+
+      return Array.from(urls);
+    }).catch(() => []);
+
     return {
       url: page.url(),
       title,
       price,
+      images,
       is_reserved: isReserved,
       has_delivery: hasDelivery,
       address,
@@ -577,4 +624,47 @@ export async function getChatHistory({ chat_url, limit = 15 }) {
       messages
     };
   });
+}
+
+export async function downloadItemImages({ url, limit = 5 }) {
+  const details = await getItemDetails({ url });
+  const itemIdMatch = details.url.match(/_(\d+)(?:\?|$)/) || url.match(/_(\d+)(?:\?|$)/) || url.match(/^(\d+)$/);
+  const itemId = itemIdMatch ? itemIdMatch[1] : `item_${Date.now()}`;
+
+  const imagesDir = path.join(DATA_DIR, "images", itemId);
+  if (!fs.existsSync(imagesDir)) {
+    fs.mkdirSync(imagesDir, { recursive: true });
+  }
+
+  const downloadedPaths = [];
+  const imageUrls = (details.images || []).slice(0, limit);
+
+  for (let i = 0; i < imageUrls.length; i++) {
+    const imgUrl = imageUrls[i];
+    try {
+      const res = await fetch(imgUrl, {
+        headers: {
+          "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+          "Referer": "https://www.avito.ru/"
+        }
+      });
+      if (res.ok) {
+        const buffer = Buffer.from(await res.arrayBuffer());
+        const filePath = path.join(imagesDir, `photo_${i + 1}.jpg`);
+        fs.writeFileSync(filePath, buffer);
+        downloadedPaths.push(path.resolve(filePath).replace(/\\/g, "/"));
+      }
+    } catch (err) {
+      log("error downloading image", imgUrl, err.message);
+    }
+  }
+
+  return {
+    item_id: itemId,
+    title: details.title,
+    price: details.price,
+    count: downloadedPaths.length,
+    image_paths: downloadedPaths,
+    images: details.images
+  };
 }
