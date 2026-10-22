@@ -298,17 +298,22 @@ export async function getItemDetails({ url }) {
 
 export async function sendMessage({ url, message }) {
   return executeWithLock(async () => {
-    const page = await getPage();
+    let page = await getPage();
     log("opening item or chat to send message:", url);
     await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
     await handleChallenge(page);
     await page.waitForTimeout(2500);
 
+    const pagesBefore = context.pages().length;
     const messageBtn = await page.$('[data-marker="messenger-button/link"], button:has-text("Написать"), a:has-text("Написать")');
     if (messageBtn) {
       log("clicking messenger button on item page...");
       await messageBtn.click();
       await page.waitForTimeout(3000);
+      if (context.pages().length > pagesBefore) {
+        activePage = context.pages()[context.pages().length - 1];
+        page = activePage;
+      }
       await handleChallenge(page);
     }
 
@@ -323,11 +328,12 @@ export async function sendMessage({ url, message }) {
     }
 
     log("typing message...");
+    await inputEl.scrollIntoViewIfNeeded?.().catch(() => {});
     await inputEl.click();
     await inputEl.fill(message);
     await page.waitForTimeout(800);
 
-    const sendBtn = await page.$('button[data-marker*="send"], button[type="submit"]');
+    const sendBtn = await page.$('button[data-marker*="send"], button[type="submit"], [data-marker*="send-button"]');
     if (sendBtn) {
       await sendBtn.click();
     } else {
