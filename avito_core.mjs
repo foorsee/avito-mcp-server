@@ -27,22 +27,34 @@ function resetIdle() {
   idleTimer.unref?.();
 }
 
+function cleanStaleLocks(dir) {
+  try {
+    for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
+      const p = path.join(dir, f);
+      try {
+        if (fs.existsSync(p) || fs.lstatSync(p).isSymbolicLink()) {
+          fs.unlinkSync(p);
+        }
+      } catch (_) {}
+    }
+  } catch (_) {}
+}
+
 function getLaunchOptions() {
-  const isLinux = process.platform === "linux";
-  const isHeadlessEnv = isLinux && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
-  const forceHeadless = process.env.AVITO_HEADLESS === "true" || isHeadlessEnv;
+  // По умолчанию для MCP-сервера в фоне запускаем headless, чтобы macOS WindowServer не падал
+  const forceHeadless = process.env.AVITO_HEADLESS !== "false";
 
   const launchArgs = [
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
     "--disable-gpu",
-    "--disable-dev-shm-usage"
+    "--disable-dev-shm-usage",
+    "--no-sandbox",
+    "--disable-setuid-sandbox",
+    "--use-mock-keychain",
+    "--password-store=basic"
   ];
-
-  if (isLinux) {
-    launchArgs.push("--no-sandbox");
-  }
 
   if (!forceHeadless) {
     launchArgs.push("--window-position=-3000,-3000", "--window-size=1280,800");
@@ -61,6 +73,7 @@ function getLaunchOptions() {
 
 export async function getBrowserContext() {
   if (context) return context;
+  cleanStaleLocks(DATA_DIR);
   log("launching persistent browser context...");
   const baseOptions = getLaunchOptions();
 
