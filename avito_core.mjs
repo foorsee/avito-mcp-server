@@ -194,7 +194,7 @@ async function ensureNotBlocked(page, maxWaitMs = 15000) {
     log("waiting for security challenge redirect, title:", title);
     await page.waitForTimeout(1500);
   }
-  throw new Error("Антибот Авито: доступ ограничен (проблема с IP или проверка безопасности). Повторите позже или проверьте соединение.");
+  throw new Error("Антибот Авито: доступ ограничен (проблема с IP или проверка безопасности). Запустите в терминале 'npm run solve' для решения капчи в браузере, либо перезагрузите роутер / смените IP.");
 }
 
 async function checkNeedsLogin(page) {

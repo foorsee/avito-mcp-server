@@ -190,7 +190,8 @@ export function getLaunchOptions({ isLogin = false, dataDir = getDataDir() } = {
     "--disable-gpu",
     "--disable-dev-shm-usage",
     "--use-mock-keychain",
-    "--password-store=basic"
+    "--password-store=basic",
+    "--user-agent=Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36"
   ];
 
   // Enable --no-sandbox if in Docker, running as root, or explicitly requested
@@ -215,6 +216,7 @@ export function getLaunchOptions({ isLogin = false, dataDir = getDataDir() } = {
     args: launchArgs,
     viewport: isLogin ? null : { width: 1280, height: 800 },
     locale: "ru-RU",
+    userAgent: "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36",
     executablePath: customPath || undefined
   };
 
