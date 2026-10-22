@@ -47,40 +47,86 @@ export function getStorageStatePath(dataDir) {
   return path.join(dataDir || getDataDir(), "storageState.json");
 }
 
-export function cleanStaleLocks(dir) {
-  try {
-    for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
-      const p = path.join(dir, f);
+/**
+ * Safely check if Chrome profile is currently locked by another active process.
+ * Does NOT blindly unlink locks if process is still alive.
+ */
+export function checkProfileLock(dataDir) {
+  const lockFiles = ["SingletonLock", "lockfile"];
+  for (const f of lockFiles) {
+    const p = path.join(dataDir, f);
+    if (!fs.existsSync(p)) continue;
+
+    if (process.platform === "win32") {
       try {
-        if (fs.existsSync(p) || fs.lstatSync(p).isSymbolicLink()) {
-          fs.unlinkSync(p);
+        const fd = fs.openSync(p, "r+");
+        fs.closeSync(fd);
+      } catch (err) {
+        if (err.code === "EBUSY" || err.code === "EPERM") {
+          return { isLocked: true, reason: "Chrome process is running on Windows (lockfile held)" };
+        }
+      }
+    } else {
+      // Unix / macOS symlink check
+      try {
+        const target = fs.readlinkSync(p);
+        const match = target.match(/-(\d+)$/);
+        if (match) {
+          const pid = parseInt(match[1], 10);
+          try {
+            process.kill(pid, 0);
+            return { isLocked: true, pid, reason: `Chrome process with PID ${pid} is currently active` };
+          } catch (_) {
+            // Process is dead, stale lock can be cleaned safely
+            try {
+              fs.unlinkSync(p);
+              const socketPath = path.join(dataDir, "SingletonSocket");
+              if (fs.existsSync(socketPath) || fs.lstatSync(socketPath).isSymbolicLink()) {
+                fs.unlinkSync(socketPath);
+              }
+            } catch (_) {}
+          }
         }
       } catch (_) {}
     }
-  } catch (_) {}
+  }
+  return { isLocked: false };
+}
+
+export function cleanStaleLocks(dir) {
+  return checkProfileLock(dir);
 }
 
 export function findSystemChromePath() {
-  if (process.env.AVITO_CHROME_PATH && fs.existsSync(process.env.AVITO_CHROME_PATH)) {
-    return process.env.AVITO_CHROME_PATH;
+  // Support AVITO_CHROME_PATH, CHROME_PATH, and PUPPETEER_EXECUTABLE_PATH
+  const explicitPath =
+    process.env.AVITO_CHROME_PATH || process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (explicitPath && fs.existsSync(explicitPath)) {
+    return explicitPath;
   }
 
   const candidatePaths = [];
   if (process.platform === "darwin") {
-    // Chrome for Testing (Playwright) — prioritized on macOS to bypass Keychain restrictions
+    // Chrome for Testing (Playwright) — check both arm64 and x64 architectures
     try {
       const pwDir = path.join(process.env.HOME || "", "Library/Caches/ms-playwright");
       if (fs.existsSync(pwDir)) {
+        const archDirs = [
+          process.arch === "arm64" ? "chrome-mac-arm64" : "chrome-mac-x64",
+          process.arch === "arm64" ? "chrome-mac-x64" : "chrome-mac-arm64"
+        ];
         for (const entry of fs.readdirSync(pwDir)) {
           if (entry.startsWith("chromium-")) {
-            const testPath = path.join(
-              pwDir,
-              entry,
-              "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-            );
-            if (fs.existsSync(testPath)) {
-              candidatePaths.push(testPath);
-              break;
+            for (const aDir of archDirs) {
+              const testPath = path.join(
+                pwDir,
+                entry,
+                `${aDir}/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing`
+              );
+              if (fs.existsSync(testPath)) {
+                candidatePaths.push(testPath);
+                break;
+              }
             }
           }
         }
@@ -125,8 +171,21 @@ export function findSystemChromePath() {
 
 export function getLaunchOptions({ isLogin = false, dataDir = getDataDir() } = {}) {
   const isLinux = process.platform === "linux";
-  // On macOS and Linux servers in background MCP mode, default to headless unless login is requested
-  const forceHeadless = !isLogin && (process.env.AVITO_HEADLESS !== "false");
+  const isHeadlessEnv = isLinux && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+
+  // Respect AVITO_HEADLESS if explicitly defined; otherwise only default to headless on headless Linux
+  let forceHeadless = false;
+  if (process.env.AVITO_HEADLESS === "true") {
+    forceHeadless = true;
+  } else if (process.env.AVITO_HEADLESS === "false") {
+    forceHeadless = false;
+  } else {
+    forceHeadless = isHeadlessEnv;
+  }
+
+  if (isLogin) {
+    forceHeadless = false;
+  }
 
   const launchArgs = [
     "--disable-blink-features=AutomationControlled",
@@ -138,15 +197,17 @@ export function getLaunchOptions({ isLogin = false, dataDir = getDataDir() } = {
     "--password-store=basic"
   ];
 
-  // Only use --no-sandbox if explicitly requested or running as root on Linux
+  // Enable --no-sandbox if in Docker, running as root, or explicitly requested
   const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-  if (isLinux && (process.env.AVITO_NO_SANDBOX === "true" || isRoot)) {
+  const inDocker = fs.existsSync("/.dockerenv");
+  if (isLinux && (process.env.AVITO_NO_SANDBOX === "true" || isRoot || inDocker)) {
     launchArgs.push("--no-sandbox", "--disable-setuid-sandbox");
   }
 
   if (isLogin) {
     launchArgs.push("--start-maximized");
   } else if (!forceHeadless) {
+    // Run off-screen on desktop so it doesn't disturb user
     launchArgs.push("--window-position=-3000,-3000", "--window-size=1280,800");
   }
 
@@ -169,7 +230,16 @@ export async function launchPersistentBrowser({ isLogin = false } = {}) {
   if (!fs.existsSync(dataDir)) {
     fs.mkdirSync(dataDir, { recursive: true });
   }
-  cleanStaleLocks(dataDir);
+
+  // Check if profile is already locked by another running Chrome process
+  const lockStatus = checkProfileLock(dataDir);
+  if (lockStatus.isLocked) {
+    throw new Error(
+      `Профиль браузера (${dataDir}) сейчас заблокирован: ${lockStatus.reason}. ` +
+      `Если у вас запущен фоновый демон (npm run cdp), сервер подключится к нему автоматически через CDP. ` +
+      `Иначе закройте запущенный браузер или процесс перед повторным запуском.`
+    );
+  }
 
   let context = null;
   let lastError = null;
@@ -216,13 +286,9 @@ export async function launchPersistentBrowser({ isLogin = false } = {}) {
   }
 
   if (!context) {
-    let profileLockHint = "";
     const msg = lastError?.message || "";
-    if (msg.includes("ProcessSingleton") || msg.includes("lock") || msg.includes("Target closed") || msg.includes("EBUSY")) {
-      profileLockHint = " Профиль браузера в avito-data заблокирован другим процессом (например, открытым окном браузера или login_avito). Закройте его и повторите.";
-    }
     throw new Error(
-      `Не удалось запустить браузер.${profileLockHint} Убедитесь, что установлен Chrome, Edge или Chromium, либо укажите путь через переменную AVITO_CHROME_PATH. Последняя ошибка: ${msg}`
+      `Не удалось запустить браузер. Убедитесь, что установлен Chrome, Edge или Chromium, либо укажите путь через переменную AVITO_CHROME_PATH. Последняя ошибка: ${msg}`
     );
   }
 
@@ -231,8 +297,15 @@ export async function launchPersistentBrowser({ isLogin = false } = {}) {
     Object.defineProperty(navigator, "webdriver", { get: () => undefined });
   });
 
-  // Restore saved cookies from storageState.json
-  await restoreCookies(context, storagePath);
+  // Only restore from storageState.json if the persistent profile DB is fresh / doesn't have cookies yet
+  // This prevents overwriting fresh session cookies with an older snapshot
+  const hasProfileCookies =
+    fs.existsSync(path.join(dataDir, "Default", "Network", "Cookies")) ||
+    fs.existsSync(path.join(dataDir, "Default", "Cookies"));
+
+  if (!hasProfileCookies) {
+    await restoreCookies(context, storagePath);
+  }
 
   return { context, dataDir, storagePath, isCdp: false };
 }

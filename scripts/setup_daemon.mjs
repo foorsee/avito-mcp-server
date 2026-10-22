@@ -3,16 +3,26 @@ import { execSync } from "child_process";
 import fs from "fs";
 import path from "path";
 import { fileURLToPath } from "url";
+import { getDataDir } from "../browser_launcher.mjs";
 
 if (process.platform !== "darwin") {
   console.log("LaunchAgent daemon setup is only applicable on macOS.");
   process.exit(0);
 }
 
+function xmlEscape(str) {
+  return String(str)
+    .replace(/&/g, "&amp;")
+    .replace(/</g, "&lt;")
+    .replace(/>/g, "&gt;")
+    .replace(/"/g, "&quot;")
+    .replace(/'/g, "&apos;");
+}
+
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 const rootDir = path.resolve(__dirname, "..");
-const dataDir = path.join(rootDir, "avito-data");
+const dataDir = getDataDir();
 if (!fs.existsSync(dataDir)) {
   fs.mkdirSync(dataDir, { recursive: true });
 }
@@ -38,19 +48,24 @@ const plistContent = `<?xml version="1.0" encoding="UTF-8"?>
   <string>com.foorsee.avito-chrome-cdp</string>
   <key>ProgramArguments</key>
   <array>
-    <string>${nodePath}</string>
-    <string>${scriptPath}</string>
+    <string>${xmlEscape(nodePath)}</string>
+    <string>${xmlEscape(scriptPath)}</string>
   </array>
+  <key>EnvironmentVariables</key>
+  <dict>
+    <key>AVITO_DATA_DIR</key>
+    <string>${xmlEscape(dataDir)}</string>
+  </dict>
   <key>WorkingDirectory</key>
-  <string>${rootDir}</string>
+  <string>${xmlEscape(rootDir)}</string>
   <key>RunAtLoad</key>
   <true/>
   <key>KeepAlive</key>
   <true/>
   <key>StandardOutPath</key>
-  <string>${stdoutPath}</string>
+  <string>${xmlEscape(stdoutPath)}</string>
   <key>StandardErrorPath</key>
-  <string>${stderrPath}</string>
+  <string>${xmlEscape(stderrPath)}</string>
 </dict>
 </plist>
 `;

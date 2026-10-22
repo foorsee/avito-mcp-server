@@ -1,9 +1,15 @@
 #!/usr/bin/env node
+import fs from "fs";
 import { spawn } from "child_process";
-import { findSystemChromePath, getDataDir, cleanStaleLocks } from "../browser_launcher.mjs";
+import { findSystemChromePath, getDataDir, checkProfileLock } from "../browser_launcher.mjs";
 
 const DATA_DIR = getDataDir();
-cleanStaleLocks(DATA_DIR);
+const lockStatus = checkProfileLock(DATA_DIR);
+if (lockStatus.isLocked) {
+  console.error(`[avito-cdp] Profile directory (${DATA_DIR}) is locked: ${lockStatus.reason}`);
+  console.error("[avito-cdp] Please close any running Chrome processes using this profile before starting CDP daemon.");
+  process.exit(1);
+}
 
 const chromePath = findSystemChromePath();
 if (!chromePath) {
@@ -12,7 +18,17 @@ if (!chromePath) {
 }
 
 const port = process.env.AVITO_CDP_PORT || "9222";
-const forceHeadless = process.env.AVITO_HEADLESS !== "false";
+const isLinux = process.platform === "linux";
+const isHeadlessEnv = isLinux && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+
+let forceHeadless = false;
+if (process.env.AVITO_HEADLESS === "true") {
+  forceHeadless = true;
+} else if (process.env.AVITO_HEADLESS === "false") {
+  forceHeadless = false;
+} else {
+  forceHeadless = isHeadlessEnv;
+}
 
 const args = [
   `--remote-debugging-port=${port}`,
@@ -26,14 +42,16 @@ const args = [
   "--password-store=basic"
 ];
 
-const isLinux = process.platform === "linux";
 const isRoot = typeof process.getuid === "function" && process.getuid() === 0;
-if (isLinux && (process.env.AVITO_NO_SANDBOX === "true" || isRoot)) {
+const inDocker = fs.existsSync("/.dockerenv");
+if (isLinux && (process.env.AVITO_NO_SANDBOX === "true" || isRoot || inDocker)) {
   args.push("--no-sandbox", "--disable-setuid-sandbox");
 }
 
 if (forceHeadless) {
   args.push("--headless=new");
+} else {
+  args.push("--window-position=-3000,-3000", "--window-size=1280,800");
 }
 
 console.log(`[avito-cdp] Launching Chrome on port ${port}...`);

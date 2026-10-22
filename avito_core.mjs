@@ -1,5 +1,7 @@
+import fs from "fs";
+import path from "path";
 import { chromium } from "playwright-core";
-import { launchPersistentBrowser, getStorageStatePath, restoreCookies, getDataDir, cleanStaleLocks } from "./browser_launcher.mjs";
+import { launchPersistentBrowser, getStorageStatePath, restoreCookies, getDataDir } from "./browser_launcher.mjs";
 
 const log = (...args) => console.error("[avito-core]", ...args);
 const DATA_DIR = getDataDir();
@@ -22,6 +24,10 @@ function resetIdle() {
 }
 
 export async function cleanupExtraTabs(context, targetPage) {
+  if (isCdp) {
+    // In CDP mode, never close tabs that might belong to the user's browser session
+    return;
+  }
   try {
     const pages = context.pages();
     for (const p of pages) {
@@ -60,8 +66,16 @@ export async function getBrowserContext() {
         Object.defineProperty(navigator, "webdriver", { get: () => undefined });
       }).catch(() => {});
 
+      // In CDP mode, Chrome already manages its profile SQLite cookies.
+      // Only import from storageState.json if profile cookie DB doesn't exist yet.
+      const hasProfileCookies =
+        fs.existsSync(path.join(DATA_DIR, "Default", "Network", "Cookies")) ||
+        fs.existsSync(path.join(DATA_DIR, "Default", "Cookies"));
+
       const storagePath = getStorageStatePath(DATA_DIR);
-      await restoreCookies(ctx, storagePath);
+      if (!hasProfileCookies) {
+        await restoreCookies(ctx, storagePath);
+      }
 
       cdpBrowser.on("disconnected", () => {
         log("CDP browser disconnected");
@@ -105,11 +119,8 @@ export async function getPage() {
 
 export async function closeBrowser() {
   if (isCdp) {
-    if (activePage && !activePage.isClosed()) {
-      await activePage.goto("about:blank").catch(() => {});
-    }
     if (cdpBrowser) {
-      await cdpBrowser.close().catch(() => {});
+      await cdpBrowser.disconnect().catch(() => {});
     }
     browserInstance = null;
     activePage = null;
@@ -248,7 +259,9 @@ export async function searchAvito({ query, location = "all", price_min, price_ma
         const location = geoEl ? geoEl.innerText.trim().replace(/\s+/g, " ") : "";
         const description = descEl ? descEl.innerText.trim() : "";
         const date = dateEl ? dateEl.innerText.trim() : "";
-        const id = el.getAttribute("data-item-id") || el.getAttribute("id") || (url.match(/_(\d+)(\?|$)/) ? url.match(/_(\d+)(\?|$)/)[1] : "");
+        const urlMatch = url.match(/_(\d+)(?:\?|$)/);
+        const rawId = el.getAttribute("data-item-id") || (urlMatch ? urlMatch[1] : "") || el.getAttribute("id") || "";
+        const id = rawId.replace(/^i/, "");
 
         const text = el.innerText || "";
         const isReserved = text.includes("Товар зарезервирован") || text.includes("Зарезервировано");
@@ -364,6 +377,21 @@ export async function sendMessage({ url, message }) {
     }
 
     log("typing message into chat...");
+    const normMessage = message.replace(/\s+/g, " ").trim();
+    const countBefore = await page.evaluate((target) => {
+      const normalize = (s) => (s || "").replace(/\s+/g, " ").trim();
+      const els = document.querySelectorAll(
+        '[data-marker*="message-item"], [data-marker*="message-text"], [class*="message-text"], [class*="ChatMessage"]'
+      );
+      let count = 0;
+      for (const el of els) {
+        if (normalize(el.innerText).includes(target)) {
+          count++;
+        }
+      }
+      return count;
+    }, normMessage).catch(() => 0);
+
     await inputEl.scrollIntoViewIfNeeded?.().catch(() => {});
     await inputEl.click();
     await inputEl.fill(message);
@@ -385,23 +413,25 @@ export async function sendMessage({ url, message }) {
       await inputEl.press("Enter");
     }
 
-    // Delivery confirmation: verify message actually appeared in chat history
+    // Delivery confirmation: verify normalized message count increases in chat history
     log("verifying message delivery in chat history...");
     const delivered = await page
       .waitForFunction(
-        (expectedText) => {
+        ({ target, beforeCount }) => {
+          const normalize = (s) => (s || "").replace(/\s+/g, " ").trim();
           const els = document.querySelectorAll(
             '[data-marker*="message-item"], [data-marker*="message-text"], [class*="message-text"], [class*="ChatMessage"]'
           );
+          let count = 0;
           for (const el of els) {
-            if (el.innerText && el.innerText.includes(expectedText)) {
-              return true;
+            if (normalize(el.innerText).includes(target)) {
+              count++;
             }
           }
-          return false;
+          return count > beforeCount;
         },
-        message,
-        { timeout: 10000 }
+        { target: normMessage, beforeCount },
+        { timeout: 12000 }
       )
       .catch(() => false);
 
@@ -439,10 +469,15 @@ export async function listChats({ limit = 10 }) {
         const snippetEl = el.querySelector('[class*="snippet"], [data-marker*="snippet"]');
         const unreadEl = el.querySelector('[class*="unread"]');
         const linkEl = el.querySelector("a") || el;
-        const href = linkEl.getAttribute("href") || "";
+        let href = linkEl.getAttribute("href") || "";
+        if (href) {
+          try {
+            href = new URL(href, "https://www.avito.ru").toString();
+          } catch (_) {}
+        }
 
         return {
-          chat_url: href ? (href.startsWith("http") ? href : `https://www.avito.ru${href}`) : "",
+          chat_url: href,
           title: titleEl ? titleEl.innerText.trim() : "",
           last_message: snippetEl ? snippetEl.innerText.trim() : "",
           has_unread: !!unreadEl
@@ -475,11 +510,17 @@ export async function getChatHistory({ chat_url, limit = 15 }) {
     if (!chat_url) {
       const firstChatLink = await page.$eval('[data-marker*="channel-item"] a, [class*="channel-item"] a', el => el.getAttribute("href")).catch(() => null);
       if (firstChatLink) {
-        const fullChatUrl = firstChatLink.startsWith("http") ? firstChatLink : `https://www.avito.ru${firstChatLink}`;
-        log("opening first conversation from list:", fullChatUrl);
-        await page.goto(fullChatUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-        await ensureNotBlocked(page);
-        await page.waitForTimeout(2500);
+        let fullChatUrl = null;
+        try {
+          fullChatUrl = validateAvitoUrl(new URL(firstChatLink, "https://www.avito.ru").toString());
+        } catch (_) {}
+
+        if (fullChatUrl) {
+          log("opening first conversation from list:", fullChatUrl);
+          await page.goto(fullChatUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+          await ensureNotBlocked(page);
+          await page.waitForTimeout(2500);
+        }
       }
     }
 
