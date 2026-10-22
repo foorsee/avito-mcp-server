@@ -6,6 +6,27 @@ import { fileURLToPath } from "url";
 const __filename = fileURLToPath(import.meta.url);
 const __dirname = path.dirname(__filename);
 
+// Автоматически подгружаем .env если есть
+const envPath = path.join(__dirname, ".env");
+if (fs.existsSync(envPath)) {
+  try {
+    const lines = fs.readFileSync(envPath, "utf-8").split("\n");
+    for (const line of lines) {
+      const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
+      if (match) {
+        const key = match[1];
+        let val = (match[2] || "").trim();
+        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
+          val = val.slice(1, -1);
+        }
+        if (!process.env[key]) {
+          process.env[key] = val;
+        }
+      }
+    }
+  } catch (_) {}
+}
+
 const log = (...args) => console.error("[avito-core]", ...args);
 const DATA_DIR = process.env.AVITO_DATA_DIR || path.join(__dirname, "avito-data");
 if (!fs.existsSync(DATA_DIR)) {
@@ -60,7 +81,43 @@ function getLaunchOptions() {
     launchArgs.push("--window-position=-3000,-3000", "--window-size=1280,800");
   }
 
-  const customPath = process.env.AVITO_CHROME_PATH || process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
+  let customPath = process.env.AVITO_CHROME_PATH || process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
+  if (!customPath) {
+    const candidatePaths = [];
+    if (process.platform === "darwin") {
+      candidatePaths.push(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        path.join(process.env.HOME || "", "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+      );
+    } else if (process.platform === "linux") {
+      candidatePaths.push(
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium"
+      );
+    } else if (process.platform === "win32") {
+      const localAppData = process.env.LOCALAPPDATA || "C:\\Program Files";
+      const progFiles = process.env["ProgramFiles"] || "C:\\Program Files";
+      const progFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+      candidatePaths.push(
+        path.join(progFiles, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(progFilesX86, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(localAppData, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(progFilesX86, "Microsoft\\Edge\\Application\\msedge.exe")
+      );
+    }
+    for (const p of candidatePaths) {
+      if (fs.existsSync(p)) {
+        customPath = p;
+        break;
+      }
+    }
+  }
 
   return {
     headless: forceHeadless,
