@@ -6,9 +6,19 @@ import { searchAvito, getItemDetails, sendMessage, getChatHistory, listChats, cl
 
 const log = (...args) => console.error("[avito-mcp]", ...args);
 
+// On macOS, GUI apps (like Claude Desktop / Cursor / Gemini Desktop) don't inherit /opt/homebrew/bin in PATH
+if (process.platform === "darwin") {
+  const extraPaths = ["/opt/homebrew/bin", "/usr/local/bin", "/opt/homebrew/sbin"];
+  const currentPath = process.env.PATH || "";
+  const missing = extraPaths.filter((p) => !currentPath.includes(p));
+  if (missing.length > 0) {
+    process.env.PATH = missing.join(":") + ":" + currentPath;
+  }
+}
+
 const server = new McpServer({
   name: "avito-mcp-server",
-  version: "1.0.0"
+  version: "1.1.0"
 });
 
 function wrapTool(name, fn) {
@@ -61,7 +71,7 @@ server.registerTool(
   "avito_send_message",
   {
     title: "Send message to Avito seller",
-    description: "Send a message to a seller on Avito to negotiate or ask questions. Requires prior login via login_avito.js.",
+    description: "Send a message to a seller on Avito to negotiate or ask questions. Requires prior login via npm run login.",
     inputSchema: {
       url: z.string().describe("Item URL or direct chat URL"),
       message: z.string().describe("Text of the message to send")
@@ -96,22 +106,26 @@ server.registerTool(
 );
 
 let shuttingDown = false;
-async function cleanup() {
+async function cleanup(exitCode = 0) {
   if (shuttingDown) return;
   shuttingDown = true;
   log("server shutting down, closing browser...");
-  await closeBrowser();
-  process.exit(0);
+  await closeBrowser().catch(() => {});
+  process.exit(exitCode);
 }
 
-process.on("SIGINT", cleanup);
-process.on("SIGTERM", cleanup);
+process.on("SIGINT", () => cleanup(0));
+process.on("SIGTERM", () => cleanup(0));
 process.on("uncaughtException", (err) => {
   log("uncaughtException:", err);
-  cleanup();
+  cleanup(1);
 });
 
+// Stdio pipe disconnection handling: when host process closes stdin, shut down browser cleanly
+process.stdin.on("end", () => cleanup(0));
+process.stdin.on("close", () => cleanup(0));
+
 const transport = new StdioServerTransport();
-transport.onclose = cleanup;
+transport.onclose = () => cleanup(0);
 await server.connect(transport);
 log("avito-mcp-server ready on stdio");

@@ -1,22 +1,10 @@
-import { chromium } from "playwright-core";
-import path from "path";
 import readline from "readline";
-import fs from "fs";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
+import { launchPersistentBrowser } from "./browser_launcher.mjs";
 
 async function main() {
-  const avitoDataDir = process.env.AVITO_DATA_DIR || path.join(__dirname, "avito-data");
-  if (!fs.existsSync(avitoDataDir)) {
-    fs.mkdirSync(avitoDataDir, { recursive: true });
-  }
-  const storageStatePath = path.join(avitoDataDir, "storageState.json");
-
   const isLinux = process.platform === "linux";
   if (isLinux && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
-    console.error("Внимание: На Linux обнаружено отсутствие графического дисплея (DISPLAY / WAYLAND_DISPLAY).");
+    console.error("\nВнимание: На Linux обнаружено отсутствие графического дисплея (DISPLAY / WAYLAND_DISPLAY).");
     console.error("Для ручного входа по SMS требуется графический интерфейс (X11, Wayland или VNC).");
     console.error("Либо вы можете авторизоваться на Windows/Mac и скопировать папку avito-data на этот сервер.\n");
   }
@@ -25,109 +13,7 @@ async function main() {
   console.log(" Запуск браузера для авторизации на Avito...");
   console.log("========================================================");
 
-  const customPath = process.env.AVITO_CHROME_PATH || process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
-  const launchOptions = {
-    headless: false,
-    args: [
-      "--start-maximized",
-      "--disable-blink-features=AutomationControlled",
-      "--no-first-run",
-      "--no-default-browser-check"
-    ],
-    viewport: null,
-    locale: "ru-RU"
-  };
-
-  if (isLinux) {
-    launchOptions.args.push("--no-sandbox");
-  }
-
-  let context = null;
-
-  // 1. Custom path
-  if (customPath && fs.existsSync(customPath)) {
-    try {
-      context = await chromium.launchPersistentContext(avitoDataDir, {
-        ...launchOptions,
-        executablePath: customPath
-      });
-      console.log(`Используется указанный браузер: ${customPath}`);
-    } catch (e) {
-      console.log("Не удалось запустить браузер по указанному пути, пробуем автопоиск...");
-    }
-  }
-
-  // 2. Channels
-  if (!context) {
-    const channels = ["chrome", "msedge", "chromium"];
-    for (const ch of channels) {
-      try {
-        context = await chromium.launchPersistentContext(avitoDataDir, {
-          ...launchOptions,
-          channel: ch
-        });
-        console.log(`Запущен браузер через канал: ${ch}`);
-        break;
-      } catch (err) {}
-    }
-  }
-
-  // 3. Common system browser paths (macOS, Linux, Windows)
-  if (!context) {
-    const commonPaths = [];
-    if (process.platform === "darwin") {
-      commonPaths.push(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        path.join(process.env.HOME || "", "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-      );
-    } else if (isLinux) {
-      commonPaths.push(
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/snap/bin/chromium"
-      );
-    } else if (process.platform === "win32") {
-      const localAppData = process.env.LOCALAPPDATA || "C:\\Program Files";
-      const progFiles = process.env["ProgramFiles"] || "C:\\Program Files";
-      const progFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
-      commonPaths.push(
-        path.join(progFiles, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(progFilesX86, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(localAppData, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(progFilesX86, "Microsoft\\Edge\\Application\\msedge.exe")
-      );
-    }
-
-    for (const binPath of commonPaths) {
-      if (fs.existsSync(binPath)) {
-        try {
-          context = await chromium.launchPersistentContext(avitoDataDir, {
-            ...launchOptions,
-            executablePath: binPath
-          });
-          console.log(`Запущен браузер: ${binPath}`);
-          break;
-        } catch (err) {}
-      }
-    }
-  }
-
-  // 4. Default bundled chromium fallback
-  if (!context) {
-    try {
-      context = await chromium.launchPersistentContext(avitoDataDir, launchOptions);
-    } catch (err) {
-      console.error("\nОшибка: Не удалось запустить ни один браузер!");
-      console.error("Установите Google Chrome, Chromium или Microsoft Edge,");
-      console.error("либо укажите путь к бинарнику через переменную AVITO_CHROME_PATH.\n");
-      process.exit(1);
-    }
-  }
+  const { context, storagePath } = await launchPersistentBrowser({ isLogin: true });
 
   const page = context.pages().length > 0 ? context.pages()[0] : await context.newPage();
 
@@ -155,10 +41,10 @@ async function main() {
   });
 
   console.log("\nСохраняем сессию и cookies...");
-  await context.storageState({ path: storageStatePath });
+  await context.storageState({ path: storagePath });
   console.log("--------------------------------------------------------");
   console.log("✅ УСПЕХ! Сессия авторизации сохранена в:");
-  console.log(storageStatePath);
+  console.log(storagePath);
   console.log("--------------------------------------------------------");
 
   await context.close();
@@ -166,6 +52,6 @@ async function main() {
 }
 
 main().catch((err) => {
-  console.error("Ошибка при авторизации:", err);
+  console.error("Ошибка при авторизации:", err.message);
   process.exit(1);
 });

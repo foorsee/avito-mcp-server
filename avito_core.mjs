@@ -1,39 +1,10 @@
 import { chromium } from "playwright-core";
-import path from "path";
-import fs from "fs";
-import { fileURLToPath } from "url";
-
-const __filename = fileURLToPath(import.meta.url);
-const __dirname = path.dirname(__filename);
-
-// Автоматически подгружаем .env если есть
-const envPath = path.join(__dirname, ".env");
-if (fs.existsSync(envPath)) {
-  try {
-    const lines = fs.readFileSync(envPath, "utf-8").split("\n");
-    for (const line of lines) {
-      const match = line.match(/^\s*([\w.-]+)\s*=\s*(.*)?\s*$/);
-      if (match) {
-        const key = match[1];
-        let val = (match[2] || "").trim();
-        if ((val.startsWith('"') && val.endsWith('"')) || (val.startsWith("'") && val.endsWith("'"))) {
-          val = val.slice(1, -1);
-        }
-        if (!process.env[key]) {
-          process.env[key] = val;
-        }
-      }
-    }
-  } catch (_) {}
-}
+import { launchPersistentBrowser, getStorageStatePath, restoreCookies, getDataDir, cleanStaleLocks } from "./browser_launcher.mjs";
 
 const log = (...args) => console.error("[avito-core]", ...args);
-const DATA_DIR = process.env.AVITO_DATA_DIR || path.join(__dirname, "avito-data");
-if (!fs.existsSync(DATA_DIR)) {
-  fs.mkdirSync(DATA_DIR, { recursive: true });
-}
+const DATA_DIR = getDataDir();
 
-let context = null;
+let browserInstance = null;
 let activePage = null;
 let cdpBrowser = null;
 let isCdp = false;
@@ -50,113 +21,24 @@ function resetIdle() {
   idleTimer.unref?.();
 }
 
-function cleanStaleLocks(dir) {
+export async function cleanupExtraTabs(context, targetPage) {
   try {
-    for (const f of ["SingletonLock", "SingletonCookie", "SingletonSocket"]) {
-      const p = path.join(dir, f);
-      try {
-        if (fs.existsSync(p) || fs.lstatSync(p).isSymbolicLink()) {
-          fs.unlinkSync(p);
-        }
-      } catch (_) {}
-    }
-  } catch (_) {}
-}
-
-function getLaunchOptions() {
-  // По умолчанию для MCP-сервера в фоне запускаем headless, чтобы macOS WindowServer не падал
-  const forceHeadless = process.env.AVITO_HEADLESS !== "false";
-
-  const launchArgs = [
-    "--disable-blink-features=AutomationControlled",
-    "--no-first-run",
-    "--no-default-browser-check",
-    "--disable-gpu",
-    "--disable-dev-shm-usage",
-    "--no-sandbox",
-    "--disable-setuid-sandbox",
-    "--use-mock-keychain",
-    "--password-store=basic"
-  ];
-
-  if (!forceHeadless) {
-    launchArgs.push("--window-position=-3000,-3000", "--window-size=1280,800");
-  }
-
-  let customPath = process.env.AVITO_CHROME_PATH || process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
-  if (!customPath) {
-    const candidatePaths = [];
-    if (process.platform === "darwin") {
-      // Chrome for Testing (Playwright) — highest priority on macOS to bypass Keychain restrictions
-      try {
-        const pwDir = path.join(process.env.HOME || "", "Library/Caches/ms-playwright");
-        if (fs.existsSync(pwDir)) {
-          const entries = fs.readdirSync(pwDir);
-          for (const entry of entries) {
-            if (entry.startsWith("chromium-")) {
-              const testPath = path.join(
-                pwDir,
-                entry,
-                "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
-              );
-              if (fs.existsSync(testPath)) {
-                candidatePaths.push(testPath);
-                break;
-              }
-            }
-          }
-        }
-      } catch (_) {}
-
-      candidatePaths.push(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        path.join(process.env.HOME || "", "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-      );
-    } else if (process.platform === "linux") {
-      candidatePaths.push(
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/snap/bin/chromium"
-      );
-    } else if (process.platform === "win32") {
-      const localAppData = process.env.LOCALAPPDATA || "C:\\Program Files";
-      const progFiles = process.env["ProgramFiles"] || "C:\\Program Files";
-      const progFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
-      candidatePaths.push(
-        path.join(progFiles, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(progFilesX86, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(localAppData, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(progFilesX86, "Microsoft\\Edge\\Application\\msedge.exe")
-      );
-    }
-    for (const p of candidatePaths) {
-      if (fs.existsSync(p)) {
-        customPath = p;
-        break;
+    const pages = context.pages();
+    for (const p of pages) {
+      if (p !== targetPage && !p.isClosed()) {
+        await p.close().catch(() => {});
       }
     }
+  } catch (err) {
+    log("error cleaning extra tabs:", err.message);
   }
-
-  return {
-    headless: forceHeadless,
-    args: launchArgs,
-    viewport: { width: 1280, height: 800 },
-    locale: "ru-RU",
-    executablePath: customPath || undefined
-  };
 }
 
 export async function getBrowserContext() {
-  if (context) return context;
-  cleanStaleLocks(DATA_DIR);
+  if (browserInstance?.context) return browserInstance.context;
 
   // 0. Connect via Chrome DevTools Protocol (CDP) if available
-  // This completely bypasses macOS sandbox restrictions in environments like Gemini Desktop
+  // This bypasses macOS sandbox restrictions in environments like Gemini Desktop / Claude Desktop
   const cdpUrl = process.env.AVITO_CDP_URL || "http://127.0.0.1:9222";
   let cdpAvailable = false;
   try {
@@ -169,19 +51,28 @@ export async function getBrowserContext() {
       log(`connecting to browser over CDP at ${cdpUrl}...`);
       cdpBrowser = await chromium.connectOverCDP(cdpUrl);
       const contexts = cdpBrowser.contexts();
-      context = contexts.length > 0 ? contexts[0] : await cdpBrowser.newContext({ locale: "ru-RU" });
+      const ctx = contexts.length > 0 ? contexts[0] : await cdpBrowser.newContext({ locale: "ru-RU" });
       isCdp = true;
       log("successfully connected over CDP");
 
+      // Context-level stealth & restore cookies in CDP mode
+      await ctx.addInitScript(() => {
+        Object.defineProperty(navigator, "webdriver", { get: () => undefined });
+      }).catch(() => {});
+
+      const storagePath = getStorageStatePath(DATA_DIR);
+      await restoreCookies(ctx, storagePath);
+
       cdpBrowser.on("disconnected", () => {
         log("CDP browser disconnected");
-        context = null;
+        browserInstance = null;
         activePage = null;
         cdpBrowser = null;
         isCdp = false;
       });
 
-      return context;
+      browserInstance = { context: ctx, dataDir: DATA_DIR, storagePath, isCdp: true };
+      return ctx;
     } catch (err) {
       log("failed connecting over CDP, falling back to local launch:", err.message);
       cdpBrowser = null;
@@ -189,105 +80,14 @@ export async function getBrowserContext() {
     }
   }
 
-  log("launching persistent browser context...");
-  const baseOptions = getLaunchOptions();
-  let lastError = null;
-
-  // 1. Try custom path if specified
-  if (baseOptions.executablePath && fs.existsSync(baseOptions.executablePath)) {
-    try {
-      context = await chromium.launchPersistentContext(DATA_DIR, baseOptions);
-      log("launched with custom executablePath:", baseOptions.executablePath);
-    } catch (err) {
-      lastError = err;
-      log("failed custom executablePath:", err.message);
-    }
-  }
-
-  // 2. Try standard system browser channels
-  if (!context) {
-    const channels = ["chrome", "msedge", "chromium"];
-    for (const ch of channels) {
-      try {
-        context = await chromium.launchPersistentContext(DATA_DIR, {
-          ...baseOptions,
-          channel: ch
-        });
-        log(`launched browser with channel '${ch}'`);
-        break;
-      } catch (err) {
-        // try next channel
-      }
-    }
-  }
-
-  // 3. Try bundled/installed Chromium
-  if (!context) {
-    try {
-      context = await chromium.launchPersistentContext(DATA_DIR, baseOptions);
-      log("launched default chromium");
-    } catch (e) {
-      // ignore
-    }
-  }
-
-  // 4. Search common binary paths for macOS, Linux and Windows
-  if (!context) {
-    const commonPaths = [];
-    if (process.platform === "darwin") {
-      commonPaths.push(
-        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
-        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
-        "/Applications/Chromium.app/Contents/MacOS/Chromium",
-        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
-        path.join(process.env.HOME || "", "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
-      );
-    } else if (process.platform === "linux") {
-      commonPaths.push(
-        "/usr/bin/google-chrome",
-        "/usr/bin/google-chrome-stable",
-        "/usr/bin/chromium",
-        "/usr/bin/chromium-browser",
-        "/snap/bin/chromium"
-      );
-    } else if (process.platform === "win32") {
-      const localAppData = process.env.LOCALAPPDATA || "C:\\Program Files";
-      const progFiles = process.env["ProgramFiles"] || "C:\\Program Files";
-      const progFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
-      commonPaths.push(
-        path.join(progFiles, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(progFilesX86, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(localAppData, "Google\\Chrome\\Application\\chrome.exe"),
-        path.join(progFilesX86, "Microsoft\\Edge\\Application\\msedge.exe")
-      );
-    }
-
-    for (const binPath of commonPaths) {
-      if (fs.existsSync(binPath)) {
-        try {
-          context = await chromium.launchPersistentContext(DATA_DIR, {
-            ...baseOptions,
-            executablePath: binPath
-          });
-          log(`launched browser at '${binPath}'`);
-          break;
-        } catch (err) {
-          log(`failed launching browser at '${binPath}':`, err.message);
-        }
-      }
-    }
-  }
-
-  if (!context) {
-    const detail = lastError ? (lastError.message || String(lastError)) : "браузер не найден";
-    throw new Error(
-      `Не удалось запустить браузер (путь: ${baseOptions.executablePath || "auto"}). Ошибка: ${detail}`
-    );
-  }
+  // 1. Launch local persistent browser context
+  log("acquiring local persistent browser context...");
+  browserInstance = await launchPersistentBrowser({ isLogin: false });
+  const { context } = browserInstance;
 
   context.on("close", () => {
     log("browser context closed");
-    context = null;
+    browserInstance = null;
     activePage = null;
   });
 
@@ -297,10 +97,8 @@ export async function getBrowserContext() {
 export async function getPage() {
   const ctx = await getBrowserContext();
   if (!activePage || activePage.isClosed()) {
-    activePage = ctx.pages().length > 0 ? ctx.pages()[0] : await ctx.newPage();
-    await activePage.addInitScript(() => {
-      Object.defineProperty(navigator, "webdriver", { get: () => undefined });
-    });
+    const pages = ctx.pages();
+    activePage = pages.length > 0 ? pages[0] : await ctx.newPage();
   }
   return activePage;
 }
@@ -313,16 +111,19 @@ export async function closeBrowser() {
     if (cdpBrowser) {
       await cdpBrowser.close().catch(() => {});
     }
-    context = null;
+    browserInstance = null;
     activePage = null;
     cdpBrowser = null;
     isCdp = false;
     return;
   }
 
-  if (context) {
-    await context.close().catch(() => {});
-    context = null;
+  if (browserInstance?.context) {
+    if (browserInstance.storagePath) {
+      await browserInstance.context.storageState({ path: browserInstance.storagePath }).catch(() => {});
+    }
+    await browserInstance.context.close().catch(() => {});
+    browserInstance = null;
     activePage = null;
   }
 }
@@ -344,26 +145,77 @@ async function executeWithLock(fn) {
   }
 }
 
-async function handleChallenge(page, maxWaitMs = 15000) {
+export function validateAvitoUrl(rawUrl) {
+  if (!rawUrl || typeof rawUrl !== "string") {
+    throw new Error("URL не указан или имеет неверный формат");
+  }
+  const trimmed = rawUrl.trim();
+  if (/^\d+$/.test(trimmed)) {
+    return `https://www.avito.ru/${trimmed}`;
+  }
+  let parsed;
+  try {
+    parsed = new URL(trimmed);
+  } catch {
+    throw new Error(`Некорректный URL: ${rawUrl}`);
+  }
+  if (parsed.protocol !== "https:") {
+    throw new Error(`Разрешен только протокол https:, получено: ${parsed.protocol}`);
+  }
+  const hostname = parsed.hostname.toLowerCase();
+  if (hostname !== "avito.ru" && hostname !== "www.avito.ru" && !hostname.endsWith(".avito.ru")) {
+    throw new Error(`Разрешены только ссылки на домен avito.ru, получено: ${hostname}`);
+  }
+  return parsed.toString();
+}
+
+async function ensureNotBlocked(page, maxWaitMs = 15000) {
   const startTime = Date.now();
   while (Date.now() - startTime < maxWaitMs) {
     const title = await page.title().catch(() => "");
-    if (!title.includes("Доступ ограничен") && !title.includes("проверка безопасности")) {
+    const bodyText = await page.innerText("body").catch(() => "");
+    const isBlocked =
+      title.includes("Доступ ограничен") ||
+      title.includes("проверка безопасности") ||
+      bodyText.includes("Доступ ограничен: проблема с IP") ||
+      bodyText.includes("Доступ ограничен: проверка безопасности");
+
+    if (!isBlocked) {
       return true;
     }
-    log("waiting for challenge redirect, title:", title);
+    log("waiting for security challenge redirect, title:", title);
     await page.waitForTimeout(1500);
   }
-  return false;
+  throw new Error("Антибот Авито: доступ ограничен (проблема с IP или проверка безопасности). Повторите позже или проверьте соединение.");
 }
 
+async function checkNeedsLogin(page) {
+  const url = page.url();
+  if (url.includes("#login") || url.includes("/login")) return true;
+  const hasLoginModal = await page
+    .$('[data-marker*="login-form"], [data-marker*="auth-modal"], [data-marker="passport/auth"]')
+    .then((el) => !!el)
+    .catch(() => false);
+  return hasLoginModal;
+}
+
+// -------------------------------------------------------------------------
+// Tools Implementation
+// -------------------------------------------------------------------------
+
 export async function searchAvito({ query, location = "all", price_min, price_max, sort = "default", limit = 10 }) {
+  if (price_min !== undefined && price_max !== undefined && price_min > price_max) {
+    throw new Error(`price_min (${price_min}) не может быть больше price_max (${price_max})`);
+  }
+
   return executeWithLock(async () => {
     const page = await getPage();
     let loc = location.toLowerCase().trim();
     if (loc === "россия" || loc === "все" || loc === "всей россии") loc = "all";
     if (loc === "москва") loc = "moskva";
     if (loc === "питер" || loc === "санкт-петербург") loc = "sankt-peterburg";
+
+    const encodedLoc = loc.split("/").map(encodeURIComponent).join("/");
 
     const params = new URLSearchParams();
     params.set("q", query);
@@ -373,10 +225,10 @@ export async function searchAvito({ query, location = "all", price_min, price_ma
     if (sort === "price_desc") params.set("s", "2");
     if (sort === "date") params.set("s", "104");
 
-    const targetUrl = `https://www.avito.ru/${encodeURIComponent(loc)}?${params.toString()}`;
+    const targetUrl = `https://www.avito.ru/${encodedLoc}?${params.toString()}`;
     log("navigating to search:", targetUrl);
     await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await handleChallenge(page);
+    await ensureNotBlocked(page);
 
     await page.waitForSelector('[data-marker="item"]', { timeout: 8000 }).catch(() => {});
 
@@ -396,7 +248,7 @@ export async function searchAvito({ query, location = "all", price_min, price_ma
         const location = geoEl ? geoEl.innerText.trim().replace(/\s+/g, " ") : "";
         const description = descEl ? descEl.innerText.trim() : "";
         const date = dateEl ? dateEl.innerText.trim() : "";
-        const id = el.getAttribute("data-item-id") || (url.match(/_(\d+)(\?|$)/) ? url.match(/_(\d+)(\?|$)/)[1] : "");
+        const id = el.getAttribute("data-item-id") || el.getAttribute("id") || (url.match(/_(\d+)(\?|$)/) ? url.match(/_(\d+)(\?|$)/)[1] : "");
 
         const text = el.innerText || "";
         const isReserved = text.includes("Товар зарезервирован") || text.includes("Зарезервировано");
@@ -416,15 +268,13 @@ export async function searchAvito({ query, location = "all", price_min, price_ma
 }
 
 export async function getItemDetails({ url }) {
+  const validUrl = validateAvitoUrl(url);
+
   return executeWithLock(async () => {
     const page = await getPage();
-    let targetUrl = url;
-    if (/^\d+$/.test(url.trim())) {
-      targetUrl = `https://www.avito.ru/${url.trim()}`;
-    }
-    log("fetching item details:", targetUrl);
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await handleChallenge(page);
+    log("fetching item details:", validUrl);
+    await page.goto(validUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await ensureNotBlocked(page);
 
     await page.waitForTimeout(2000);
 
@@ -468,91 +318,105 @@ export async function getItemDetails({ url }) {
 }
 
 export async function sendMessage({ url, message }) {
-  return executeWithLock(async () => {
-    let page = await getPage();
-    log("opening item or chat to send message:", url);
-    await page.goto(url, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await handleChallenge(page);
-    await page.waitForTimeout(2500);
+  const validUrl = validateAvitoUrl(url);
 
-    const pagesBefore = context.pages().length;
-    const messageBtn = await page.$('[data-marker="messenger-button/link"], button:has-text("Написать"), a:has-text("Написать")');
+  return executeWithLock(async () => {
+    const ctx = await getBrowserContext();
+    let page = await getPage();
+    log("opening item or chat to send message:", validUrl);
+    await page.goto(validUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await ensureNotBlocked(page);
+    await page.waitForTimeout(2000);
+
+    const pagesBefore = ctx.pages().length;
+    const messageBtn = await page.$('[data-marker="messenger-button/link"], [data-marker*="messenger-button"], button:has-text("Написать"), a:has-text("Написать")');
     if (messageBtn) {
       log("clicking messenger button on item page...");
       await messageBtn.click();
       await page.waitForTimeout(3000);
-      if (context.pages().length > pagesBefore) {
-        activePage = context.pages()[context.pages().length - 1];
+
+      // Check if a new tab was opened
+      if (ctx.pages().length > pagesBefore) {
+        activePage = ctx.pages()[ctx.pages().length - 1];
         page = activePage;
       }
-      await handleChallenge(page);
+      await ensureNotBlocked(page);
     }
 
-    if (page.url().includes("#login") || page.url().includes("/login")) {
+    if (await checkNeedsLogin(page)) {
       throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
     }
 
-    const inputSelector = 'textarea[data-marker*="reply-input"], textarea[data-marker*="message"], [contenteditable="true"], textarea';
-    const inputEl = await page.waitForSelector(inputSelector, { timeout: 10000 }).catch(() => null);
+    // Scoped chat input selectors (never generic page textarea)
+    const inputSelector = [
+      'textarea[data-marker*="reply-input"]',
+      'textarea[data-marker*="chat-input"]',
+      '[data-marker*="chat"] textarea',
+      '[data-marker*="messenger"] textarea',
+      '[class*="chat-input"] textarea',
+      '[class*="chat"] [contenteditable="true"]',
+      '[class*="messenger"] [contenteditable="true"]'
+    ].join(", ");
+
+    const inputEl = await page.waitForSelector(inputSelector, { timeout: 12000 }).catch(() => null);
     if (!inputEl) {
       throw new Error("Поле ввода сообщения в чате не найдено. Возможно, продавец отключил сообщения или страница не загрузилась.");
     }
 
-    log("typing message...");
+    log("typing message into chat...");
     await inputEl.scrollIntoViewIfNeeded?.().catch(() => {});
     await inputEl.click();
     await inputEl.fill(message);
-    await page.waitForTimeout(800);
+    await page.waitForTimeout(600);
 
-    const sendBtn = await page.$('button[data-marker*="send"], button[type="submit"], [data-marker*="send-button"]');
+    // Send button scoped strictly to chat/messenger (never page-wide button[type=submit])
+    const sendBtnSelector = [
+      'button[data-marker*="send"]',
+      'button[data-marker*="chat-send"]',
+      'button[data-marker*="reply-send"]',
+      '[data-marker*="chat"] button[type="submit"]',
+      '[data-marker*="messenger"] button[type="submit"]'
+    ].join(", ");
+
+    const sendBtn = await page.$(sendBtnSelector);
     if (sendBtn) {
       await sendBtn.click();
     } else {
       await inputEl.press("Enter");
     }
 
-    await page.waitForTimeout(2000);
-    log("message sent successfully");
+    // Delivery confirmation: verify message actually appeared in chat history
+    log("verifying message delivery in chat history...");
+    const delivered = await page
+      .waitForFunction(
+        (expectedText) => {
+          const els = document.querySelectorAll(
+            '[data-marker*="message-item"], [data-marker*="message-text"], [class*="message-text"], [class*="ChatMessage"]'
+          );
+          for (const el of els) {
+            if (el.innerText && el.innerText.includes(expectedText)) {
+              return true;
+            }
+          }
+          return false;
+        },
+        message,
+        { timeout: 10000 }
+      )
+      .catch(() => false);
 
+    if (!delivered) {
+      throw new Error("Сообщение было отправлено, но не появилось в ленте чата. Возможно, оно заблокировано модерацией Авито или произошел сбой сети.");
+    }
+
+    // Clean up any extra tabs that were opened
+    await cleanupExtraTabs(ctx, page);
+
+    log("message delivered and verified successfully");
     return {
       status: "success",
       chat_url: page.url(),
       sent_message: message
-    };
-  });
-}
-
-export async function getChatHistory({ chat_url, limit = 15 }) {
-  return executeWithLock(async () => {
-    const page = await getPage();
-    const targetUrl = chat_url || "https://www.avito.ru/profile/messenger";
-    log("navigating to chat:", targetUrl);
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await handleChallenge(page);
-    await page.waitForTimeout(3000);
-
-    if (page.url().includes("#login") || page.url().includes("/login")) {
-      throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
-    }
-
-    const messages = await page.$$eval('[data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]', (els, max) => {
-      return els.slice(-max).map((el) => {
-        const textEl = el.querySelector('[class*="text"], [data-marker*="message-text"]') || el;
-        const timeEl = el.querySelector('[class*="time"], [data-marker*="message-time"]');
-        const isMe = el.className.includes("out") || el.getAttribute("data-is-out") === "true";
-        return {
-          sender: isMe ? "me" : "seller",
-          text: textEl ? textEl.innerText.trim() : "",
-          time: timeEl ? timeEl.innerText.trim() : ""
-        };
-      });
-    }, limit);
-
-    return {
-      chat_url: page.url(),
-      title: await page.title(),
-      messages_count: messages.length,
-      messages
     };
   });
 }
@@ -562,10 +426,10 @@ export async function listChats({ limit = 10 }) {
     const page = await getPage();
     log("navigating to messenger chat list...");
     await page.goto("https://www.avito.ru/profile/messenger", { waitUntil: "domcontentloaded", timeout: 45000 });
-    await handleChallenge(page);
+    await ensureNotBlocked(page);
     await page.waitForTimeout(3000);
 
-    if (page.url().includes("#login") || page.url().includes("/login")) {
+    if (await checkNeedsLogin(page)) {
       throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
     }
 
@@ -589,6 +453,68 @@ export async function listChats({ limit = 10 }) {
     return {
       count: chats.length,
       chats
+    };
+  });
+}
+
+export async function getChatHistory({ chat_url, limit = 15 }) {
+  const targetUrl = chat_url ? validateAvitoUrl(chat_url) : "https://www.avito.ru/profile/messenger";
+
+  return executeWithLock(async () => {
+    const page = await getPage();
+    log("navigating to chat:", targetUrl);
+    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+    await ensureNotBlocked(page);
+    await page.waitForTimeout(3000);
+
+    if (await checkNeedsLogin(page)) {
+      throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
+    }
+
+    // If no specific chat_url was provided, pick the first active conversation from the list
+    if (!chat_url) {
+      const firstChatLink = await page.$eval('[data-marker*="channel-item"] a, [class*="channel-item"] a', el => el.getAttribute("href")).catch(() => null);
+      if (firstChatLink) {
+        const fullChatUrl = firstChatLink.startsWith("http") ? firstChatLink : `https://www.avito.ru${firstChatLink}`;
+        log("opening first conversation from list:", fullChatUrl);
+        await page.goto(fullChatUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+        await ensureNotBlocked(page);
+        await page.waitForTimeout(2500);
+      }
+    }
+
+    // Extract messages: deduplicate nested elements and use strict word boundaries for direction
+    const messages = await page.$$eval(
+      '[data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]',
+      (els, max) => {
+        // Filter out nested duplicates: only keep elements that have no other matched element as an ancestor
+        const uniqueEls = els.filter((el) => !els.some((other) => other !== el && other.contains(el)));
+
+        return uniqueEls.slice(-max).map((el) => {
+          const textEl = el.querySelector('[data-marker*="message-text"], [class*="message-text"], [class*="text"]') || el;
+          const timeEl = el.querySelector('[data-marker*="message-time"], [class*="message-time"], [class*="time"]');
+
+          // Strict direction check: use word boundaries or explicit data attributes
+          const className = el.className || "";
+          const isOut =
+            /\b(out|message-out|ChatMessage-module_out)\b/.test(className) ||
+            el.getAttribute("data-is-out") === "true";
+
+          return {
+            sender: isOut ? "me" : "seller",
+            text: textEl ? textEl.innerText.trim() : "",
+            time: timeEl ? timeEl.innerText.trim() : ""
+          };
+        });
+      },
+      limit
+    );
+
+    return {
+      chat_url: page.url(),
+      title: await page.title(),
+      messages_count: messages.length,
+      messages
     };
   });
 }
