@@ -85,6 +85,27 @@ function getLaunchOptions() {
   if (!customPath) {
     const candidatePaths = [];
     if (process.platform === "darwin") {
+      // Chrome for Testing (Playwright) — highest priority on macOS to bypass Keychain restrictions
+      try {
+        const pwDir = path.join(process.env.HOME || "", "Library/Caches/ms-playwright");
+        if (fs.existsSync(pwDir)) {
+          const entries = fs.readdirSync(pwDir);
+          for (const entry of entries) {
+            if (entry.startsWith("chromium-")) {
+              const testPath = path.join(
+                pwDir,
+                entry,
+                "chrome-mac-arm64/Google Chrome for Testing.app/Contents/MacOS/Google Chrome for Testing"
+              );
+              if (fs.existsSync(testPath)) {
+                candidatePaths.push(testPath);
+                break;
+              }
+            }
+          }
+        }
+      } catch (_) {}
+
       candidatePaths.push(
         "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
         "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
@@ -133,6 +154,7 @@ export async function getBrowserContext() {
   cleanStaleLocks(DATA_DIR);
   log("launching persistent browser context...");
   const baseOptions = getLaunchOptions();
+  let lastError = null;
 
   // 1. Try custom path if specified
   if (baseOptions.executablePath && fs.existsSync(baseOptions.executablePath)) {
@@ -140,6 +162,7 @@ export async function getBrowserContext() {
       context = await chromium.launchPersistentContext(DATA_DIR, baseOptions);
       log("launched with custom executablePath:", baseOptions.executablePath);
     } catch (err) {
+      lastError = err;
       log("failed custom executablePath:", err.message);
     }
   }
@@ -219,8 +242,9 @@ export async function getBrowserContext() {
   }
 
   if (!context) {
+    const detail = lastError ? (lastError.message || String(lastError)) : "браузер не найден";
     throw new Error(
-      "Не удалось запустить браузер. Убедитесь, что установлен Chrome, Edge или Chromium, либо задайте переменную AVITO_CHROME_PATH."
+      `Не удалось запустить браузер (путь: ${baseOptions.executablePath || "auto"}). Ошибка: ${detail}`
     );
   }
 
