@@ -110,26 +110,52 @@ export async function getBrowserContext() {
       context = await chromium.launchPersistentContext(DATA_DIR, baseOptions);
       log("launched default chromium");
     } catch (e) {
-      // 4. On Linux, search common binary paths
-      if (process.platform === "linux") {
-        const commonPaths = [
-          "/usr/bin/google-chrome",
-          "/usr/bin/google-chrome-stable",
-          "/usr/bin/chromium",
-          "/usr/bin/chromium-browser",
-          "/snap/bin/chromium"
-        ];
-        for (const binPath of commonPaths) {
-          if (fs.existsSync(binPath)) {
-            try {
-              context = await chromium.launchPersistentContext(DATA_DIR, {
-                ...baseOptions,
-                executablePath: binPath
-              });
-              log(`launched browser at '${binPath}'`);
-              break;
-            } catch (err) {}
-          }
+      // ignore
+    }
+  }
+
+  // 4. Search common binary paths for macOS, Linux and Windows
+  if (!context) {
+    const commonPaths = [];
+    if (process.platform === "darwin") {
+      commonPaths.push(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        path.join(process.env.HOME || "", "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+      );
+    } else if (process.platform === "linux") {
+      commonPaths.push(
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium"
+      );
+    } else if (process.platform === "win32") {
+      const localAppData = process.env.LOCALAPPDATA || "C:\\Program Files";
+      const progFiles = process.env["ProgramFiles"] || "C:\\Program Files";
+      const progFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+      commonPaths.push(
+        path.join(progFiles, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(progFilesX86, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(localAppData, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(progFilesX86, "Microsoft\\Edge\\Application\\msedge.exe")
+      );
+    }
+
+    for (const binPath of commonPaths) {
+      if (fs.existsSync(binPath)) {
+        try {
+          context = await chromium.launchPersistentContext(DATA_DIR, {
+            ...baseOptions,
+            executablePath: binPath
+          });
+          log(`launched browser at '${binPath}'`);
+          break;
+        } catch (err) {
+          log(`failed launching browser at '${binPath}':`, err.message);
         }
       }
     }

@@ -72,15 +72,37 @@ async function main() {
     }
   }
 
-  // 3. Common Linux paths
-  if (!context && isLinux) {
-    const commonPaths = [
-      "/usr/bin/google-chrome",
-      "/usr/bin/google-chrome-stable",
-      "/usr/bin/chromium",
-      "/usr/bin/chromium-browser",
-      "/snap/bin/chromium"
-    ];
+  // 3. Common system browser paths (macOS, Linux, Windows)
+  if (!context) {
+    const commonPaths = [];
+    if (process.platform === "darwin") {
+      commonPaths.push(
+        "/Applications/Google Chrome.app/Contents/MacOS/Google Chrome",
+        "/Applications/Microsoft Edge.app/Contents/MacOS/Microsoft Edge",
+        "/Applications/Chromium.app/Contents/MacOS/Chromium",
+        "/Applications/Brave Browser.app/Contents/MacOS/Brave Browser",
+        path.join(process.env.HOME || "", "Applications/Google Chrome.app/Contents/MacOS/Google Chrome")
+      );
+    } else if (isLinux) {
+      commonPaths.push(
+        "/usr/bin/google-chrome",
+        "/usr/bin/google-chrome-stable",
+        "/usr/bin/chromium",
+        "/usr/bin/chromium-browser",
+        "/snap/bin/chromium"
+      );
+    } else if (process.platform === "win32") {
+      const localAppData = process.env.LOCALAPPDATA || "C:\\Program Files";
+      const progFiles = process.env["ProgramFiles"] || "C:\\Program Files";
+      const progFilesX86 = process.env["ProgramFiles(x86)"] || "C:\\Program Files (x86)";
+      commonPaths.push(
+        path.join(progFiles, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(progFilesX86, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(localAppData, "Google\\Chrome\\Application\\chrome.exe"),
+        path.join(progFilesX86, "Microsoft\\Edge\\Application\\msedge.exe")
+      );
+    }
+
     for (const binPath of commonPaths) {
       if (fs.existsSync(binPath)) {
         try {
