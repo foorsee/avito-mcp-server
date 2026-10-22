@@ -1,6 +1,8 @@
 # Avito MCP Server
 
-Model Context Protocol (MCP) сервер для интеграции AI-ассистентов (Claude, Cursor, Antigravity и др.) с платформой **Авито (Avito.ru)**.
+Кроссплатформенный Model Context Protocol (MCP) сервер для интеграции AI-ассистентов (Claude, Cursor, Antigravity и др.) с платформой **Авито (Avito.ru)**.
+
+Поддерживает **Windows**, **macOS** и **Linux**.
 
 Позволяет агенту искать объявления, анализировать состояние товаров и продавцов, читать чаты и вести диалог / торговаться от имени вашего аккаунта.
 
@@ -13,6 +15,13 @@ Model Context Protocol (MCP) сервер для интеграции AI-асс�
 - `avito_send_message` — отправка сообщения продавцу в чат по объявлению (для торга или уточнения деталей)
 - `avito_list_chats` — список недавних диалогов в мессенджере с превью и статусом непрочитанных
 - `avito_get_chat_history` — чтение истории сообщений в конкретном чате
+
+---
+
+## Требования
+
+- **Node.js** >= 18
+- Установленный браузер: **Google Chrome**, **Microsoft Edge** или **Chromium** (на macOS и Windows находится автоматически; на Linux ищутся стандартные пути в `/usr/bin/` или задаются через переменную).
 
 ---
 
@@ -30,13 +39,22 @@ npm install
 
 Для того чтобы сервер мог писать продавцам и читать чаты от вашего имени:
 
-- **Windows:** запустите двойным кликом `login_avito.bat` (или выполните `npm run login`)
+- **Windows:** запустите `login_avito.bat` или выполните:
+  ```bash
+  npm run login
+  ```
 - **macOS / Linux:** выполните:
   ```bash
+  chmod +x login_avito.sh
+  ./login_avito.sh
+  # или
   npm run login
   ```
 
 Откроется окно браузера. Войдите в свой профиль на Авито по номеру телефона / СМС и нажмите `ENTER` в консоли. Сессия сохранится локально в папке `avito-data` (эта папка находится в `.gitignore` и никогда не попадает в репозиторий).
+
+> **Для headless Linux серверов (без дисплея):**
+> Авторизуйтесь на компьютере с монитором (Windows или macOS), а затем просто скопируйте созданную папку `avito-data` на ваш Linux-сервер в корень проекта.
 
 ---
 
@@ -46,25 +64,41 @@ npm install
 
 Добавьте сервер в ваш файл конфигурации (`mcp_config.json` или `claude_desktop_config.json`):
 
+#### Windows
 ```json
 {
   "mcpServers": {
     "avito": {
       "command": "node",
       "args": [
-        "/путь/к/папке/avito-mcp-server/avito_server.mjs"
+        "C:/Users/<Username>/Documents/avito-mcp-server/avito_server.mjs"
       ]
     }
   }
 }
 ```
 
-Для Windows пути указываются через слеши или двойные обратные слеши, например:
+#### macOS / Linux
 ```json
-"args": [
-  "C:/Users/<Username>/Documents/avito-mcp-server/avito_server.mjs"
-]
+{
+  "mcpServers": {
+    "avito": {
+      "command": "node",
+      "args": [
+        "/home/<username>/avito-mcp-server/avito_server.mjs"
+      ]
+    }
+  }
+}
 ```
+
+---
+
+## Переменные окружения (Опционально)
+
+- `AVITO_DATA_DIR` — путь к директории хранения сессии (по умолчанию папка `./avito-data` в корне проекта).
+- `AVITO_CHROME_PATH` — путь к конкретному исполняемому файлу браузера (Chrome/Chromium), если он установлен в нестандартном месте.
+- `AVITO_HEADLESS` — установить `true` для принудительного запуска в headless-режиме (на Linux без X11/Wayland включается автоматически).
 
 ---
 

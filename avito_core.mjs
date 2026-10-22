@@ -27,46 +27,105 @@ function resetIdle() {
   idleTimer.unref?.();
 }
 
-export async function getBrowserContext() {
-  if (context) return context;
-  log("launching persistent browser context...");
+function getLaunchOptions() {
+  const isLinux = process.platform === "linux";
+  const isHeadlessEnv = isLinux && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY;
+  const forceHeadless = process.env.AVITO_HEADLESS === "true" || isHeadlessEnv;
+
   const launchArgs = [
     "--disable-blink-features=AutomationControlled",
     "--no-first-run",
     "--no-default-browser-check",
-    "--window-position=-3000,-3000",
-    "--window-size=1280,800",
     "--disable-gpu",
     "--disable-dev-shm-usage"
   ];
 
-  try {
-    context = await chromium.launchPersistentContext(DATA_DIR, {
-      headless: false,
-      channel: "chrome",
-      args: launchArgs,
-      viewport: { width: 1280, height: 800 },
-      locale: "ru-RU"
-    });
-  } catch (err) {
-    log("falling back to msedge:", err.message);
+  if (isLinux) {
+    launchArgs.push("--no-sandbox");
+  }
+
+  if (!forceHeadless) {
+    launchArgs.push("--window-position=-3000,-3000", "--window-size=1280,800");
+  }
+
+  const customPath = process.env.AVITO_CHROME_PATH || process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
+
+  return {
+    headless: forceHeadless,
+    args: launchArgs,
+    viewport: { width: 1280, height: 800 },
+    locale: "ru-RU",
+    executablePath: customPath || undefined
+  };
+}
+
+export async function getBrowserContext() {
+  if (context) return context;
+  log("launching persistent browser context...");
+  const baseOptions = getLaunchOptions();
+
+  // 1. Try custom path if specified
+  if (baseOptions.executablePath && fs.existsSync(baseOptions.executablePath)) {
     try {
-      context = await chromium.launchPersistentContext(DATA_DIR, {
-        headless: false,
-        channel: "msedge",
-        args: launchArgs,
-        viewport: { width: 1280, height: 800 },
-        locale: "ru-RU"
-      });
-    } catch (e) {
-      log("falling back to default chromium:", e.message);
-      context = await chromium.launchPersistentContext(DATA_DIR, {
-        headless: false,
-        args: launchArgs,
-        viewport: { width: 1280, height: 800 },
-        locale: "ru-RU"
-      });
+      context = await chromium.launchPersistentContext(DATA_DIR, baseOptions);
+      log("launched with custom executablePath:", baseOptions.executablePath);
+    } catch (err) {
+      log("failed custom executablePath:", err.message);
     }
+  }
+
+  // 2. Try standard system browser channels
+  if (!context) {
+    const channels = ["chrome", "msedge", "chromium"];
+    for (const ch of channels) {
+      try {
+        context = await chromium.launchPersistentContext(DATA_DIR, {
+          ...baseOptions,
+          channel: ch
+        });
+        log(`launched browser with channel '${ch}'`);
+        break;
+      } catch (err) {
+        // try next channel
+      }
+    }
+  }
+
+  // 3. Try bundled/installed Chromium
+  if (!context) {
+    try {
+      context = await chromium.launchPersistentContext(DATA_DIR, baseOptions);
+      log("launched default chromium");
+    } catch (e) {
+      // 4. On Linux, search common binary paths
+      if (process.platform === "linux") {
+        const commonPaths = [
+          "/usr/bin/google-chrome",
+          "/usr/bin/google-chrome-stable",
+          "/usr/bin/chromium",
+          "/usr/bin/chromium-browser",
+          "/snap/bin/chromium"
+        ];
+        for (const binPath of commonPaths) {
+          if (fs.existsSync(binPath)) {
+            try {
+              context = await chromium.launchPersistentContext(DATA_DIR, {
+                ...baseOptions,
+                executablePath: binPath
+              });
+              log(`launched browser at '${binPath}'`);
+              break;
+            } catch (err) {}
+          }
+        }
+      }
+    }
+  }
+
+  if (!context) {
+    throw new Error(
+      "Не удалось запустить браузер. Убедитесь, что установлен Chrome, Edge или Chromium, либо задайте переменную AVITO_CHROME_PATH."
+    );
   }
 
   context.on("close", () => {
@@ -254,7 +313,7 @@ export async function sendMessage({ url, message }) {
     }
 
     if (page.url().includes("#login") || page.url().includes("/login")) {
-      throw new Error("Необходима авторизация в аккаунте Авито! Запустите login_avito.js для входа.");
+      throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
     }
 
     const inputSelector = 'textarea[data-marker*="reply-input"], textarea[data-marker*="message"], [contenteditable="true"], textarea';
@@ -296,7 +355,7 @@ export async function getChatHistory({ chat_url, limit = 15 }) {
     await page.waitForTimeout(3000);
 
     if (page.url().includes("#login") || page.url().includes("/login")) {
-      throw new Error("Необходима авторизация в аккаунте Авито! Запустите login_avito.js для входа.");
+      throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
     }
 
     const messages = await page.$$eval('[data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]', (els, max) => {
@@ -330,7 +389,7 @@ export async function listChats({ limit = 10 }) {
     await page.waitForTimeout(3000);
 
     if (page.url().includes("#login") || page.url().includes("/login")) {
-      throw new Error("Необходима авторизация в аккаунте Авито! Запустите login_avito.js для входа.");
+      throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
     }
 
     const chats = await page.$$eval('[data-marker*="channel-item"], [class*="channel-item"]', (els, max) => {

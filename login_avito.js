@@ -14,14 +14,20 @@ async function main() {
   }
   const storageStatePath = path.join(avitoDataDir, "storageState.json");
 
+  const isLinux = process.platform === "linux";
+  if (isLinux && !process.env.DISPLAY && !process.env.WAYLAND_DISPLAY) {
+    console.error("Внимание: На Linux обнаружено отсутствие графического дисплея (DISPLAY / WAYLAND_DISPLAY).");
+    console.error("Для ручного входа по SMS требуется графический интерфейс (X11, Wayland или VNC).");
+    console.error("Либо вы можете авторизоваться на Windows/Mac и скопировать папку avito-data на этот сервер.\n");
+  }
+
   console.log("========================================================");
   console.log(" Запуск браузера для авторизации на Avito...");
   console.log("========================================================");
 
-  let context;
+  const customPath = process.env.AVITO_CHROME_PATH || process.env.CHROME_PATH || process.env.PUPPETEER_EXECUTABLE_PATH;
   const launchOptions = {
     headless: false,
-    channel: "chrome",
     args: [
       "--start-maximized",
       "--disable-blink-features=AutomationControlled",
@@ -32,21 +38,72 @@ async function main() {
     locale: "ru-RU"
   };
 
-  try {
-    context = await chromium.launchPersistentContext(avitoDataDir, launchOptions);
-  } catch (err) {
-    console.log("Переключаемся на Microsoft Edge...");
+  if (isLinux) {
+    launchOptions.args.push("--no-sandbox");
+  }
+
+  let context = null;
+
+  // 1. Custom path
+  if (customPath && fs.existsSync(customPath)) {
     try {
       context = await chromium.launchPersistentContext(avitoDataDir, {
         ...launchOptions,
-        channel: "msedge"
+        executablePath: customPath
       });
+      console.log(`Используется указанный браузер: ${customPath}`);
     } catch (e) {
-      console.log("Запускаем стандартный chromium...");
-      context = await chromium.launchPersistentContext(avitoDataDir, {
-        ...launchOptions,
-        channel: undefined
-      });
+      console.log("Не удалось запустить браузер по указанному пути, пробуем автопоиск...");
+    }
+  }
+
+  // 2. Channels
+  if (!context) {
+    const channels = ["chrome", "msedge", "chromium"];
+    for (const ch of channels) {
+      try {
+        context = await chromium.launchPersistentContext(avitoDataDir, {
+          ...launchOptions,
+          channel: ch
+        });
+        console.log(`Запущен браузер через канал: ${ch}`);
+        break;
+      } catch (err) {}
+    }
+  }
+
+  // 3. Common Linux paths
+  if (!context && isLinux) {
+    const commonPaths = [
+      "/usr/bin/google-chrome",
+      "/usr/bin/google-chrome-stable",
+      "/usr/bin/chromium",
+      "/usr/bin/chromium-browser",
+      "/snap/bin/chromium"
+    ];
+    for (const binPath of commonPaths) {
+      if (fs.existsSync(binPath)) {
+        try {
+          context = await chromium.launchPersistentContext(avitoDataDir, {
+            ...launchOptions,
+            executablePath: binPath
+          });
+          console.log(`Запущен браузер: ${binPath}`);
+          break;
+        } catch (err) {}
+      }
+    }
+  }
+
+  // 4. Default bundled chromium fallback
+  if (!context) {
+    try {
+      context = await chromium.launchPersistentContext(avitoDataDir, launchOptions);
+    } catch (err) {
+      console.error("\nОшибка: Не удалось запустить ни один браузер!");
+      console.error("Установите Google Chrome, Chromium или Microsoft Edge,");
+      console.error("либо укажите путь к бинарнику через переменную AVITO_CHROME_PATH.\n");
+      process.exit(1);
     }
   }
 
