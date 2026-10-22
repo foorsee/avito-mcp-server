@@ -7,9 +7,11 @@ async function run() {
   try {
     if (cmd === "search") {
       const query = args[0] || "iphone";
-      const pmax = args[1] ? Number(args[1]) : undefined;
-      const pmin = args[2] ? Number(args[2]) : undefined;
-      const res = await searchAvito({ query, price_max: pmax, price_min: pmin, location: "all", limit: 10 });
+      const pmax = args[1] && !isNaN(Number(args[1])) ? Number(args[1]) : undefined;
+      const pmin = args[2] && !isNaN(Number(args[2])) ? Number(args[2]) : undefined;
+      const location = args[3] || "respublika_krym";
+      const limit = args[4] ? Number(args[4]) : 15;
+      const res = await searchAvito({ query, price_max: pmax, price_min: pmin, location, limit });
       console.log(JSON.stringify(res, null, 2));
     } else if (cmd === "images") {
       const url = args[0];
@@ -37,7 +39,7 @@ async function run() {
       console.log(JSON.stringify(res, null, 2));
     } else {
       console.log("Использование:");
-      console.log("  node avito_cli.mjs search <запрос> [max_price] [min_price]");
+      console.log("  node avito_cli.mjs search <запрос> [max_price] [min_price] [location] [limit]");
       console.log("  node avito_cli.mjs details <url>");
       console.log("  node avito_cli.mjs images <url> [limit]");
       console.log("  node avito_cli.mjs chats");
