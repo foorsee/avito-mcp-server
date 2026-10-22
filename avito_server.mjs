@@ -2,7 +2,7 @@
 import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { StdioServerTransport } from "@modelcontextprotocol/sdk/server/stdio.js";
 import { z } from "zod";
-import { searchAvito, getItemDetails, downloadItemImages, sendMessage, getChatHistory, listChats, closeBrowser } from "./avito_core.mjs";
+import { searchAvito, getItemDetails, downloadItemImages, sendMessage, getChatHistory, listChats, transcribeAudio, closeBrowser } from "./avito_core.mjs";
 
 const log = (...args) => console.error("[avito-mcp]", ...args);
 
@@ -96,10 +96,11 @@ server.registerTool(
   "avito_get_chat_history",
   {
     title: "Get chat messages with Avito seller",
-    description: "Read message history in an active Avito chat to check seller responses.",
+    description: "Read message history in an active Avito chat to check seller responses, with automatic voice message transcription via Sber GigaAM.",
     inputSchema: {
       chat_url: z.string().optional().describe("URL of the specific chat or empty for active chat"),
-      limit: z.number().int().min(1).max(30).default(15).describe("Max messages to return")
+      limit: z.number().int().min(1).max(30).default(15).describe("Max messages to return"),
+      transcribe_voice: z.boolean().default(true).describe("Transcribe seller voice messages using Sber GigaAM AI")
     }
   },
   wrapTool("avito_get_chat_history", getChatHistory)
@@ -116,6 +117,19 @@ server.registerTool(
     }
   },
   wrapTool("avito_download_images", downloadItemImages)
+);
+
+server.registerTool(
+  "avito_transcribe_audio",
+  {
+    title: "Transcribe voice message or audio with Sber GigaAM",
+    description: "Transcribes an audio file (voice message, WAV, OGG, MP3, etc.) using Sber GigaAM Russian ASR model.",
+    inputSchema: {
+      audio_path: z.string().describe("Absolute or relative path to the audio file"),
+      model: z.string().default("v2_ctc").describe("GigaAM model: v2_ctc (recommended fast/accurate), v3_ctc, etc.")
+    }
+  },
+  wrapTool("avito_transcribe_audio", ({ audio_path, model }) => transcribeAudio(audio_path, { model }))
 );
 
 

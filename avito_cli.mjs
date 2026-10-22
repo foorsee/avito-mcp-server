@@ -1,5 +1,5 @@
 #!/usr/bin/env node
-import { searchAvito, getItemDetails, downloadItemImages, sendMessage, getChatHistory, listChats, closeBrowser } from "./avito_core.mjs";
+import { searchAvito, getItemDetails, downloadItemImages, sendMessage, getChatHistory, listChats, transcribeAudio, closeBrowser } from "./avito_core.mjs";
 
 const [cmd, ...args] = process.argv.slice(2);
 
@@ -37,6 +37,12 @@ async function run() {
       const chatUrl = args[0];
       const res = await getChatHistory({ chat_url: chatUrl });
       console.log(JSON.stringify(res, null, 2));
+    } else if (cmd === "transcribe") {
+      const audioPath = args[0];
+      if (!audioPath) throw new Error("Укажите путь к аудиофайлу");
+      const model = args[1] || "v2_ctc";
+      const res = await transcribeAudio(audioPath, { model });
+      console.log(JSON.stringify(res, null, 2));
     } else {
       console.log("Использование:");
       console.log("  node avito_cli.mjs search <запрос> [max_price] [min_price] [location] [limit]");
@@ -44,6 +50,7 @@ async function run() {
       console.log("  node avito_cli.mjs images <url> [limit]");
       console.log("  node avito_cli.mjs chats");
       console.log("  node avito_cli.mjs history [chat_url]");
+      console.log("  node avito_cli.mjs transcribe <audio_path> [model]");
       console.log("  node avito_cli.mjs send <url> <сообщение>");
     }
   } catch (err) {

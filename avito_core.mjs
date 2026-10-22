@@ -1,10 +1,21 @@
 import fs from "fs";
 import path from "path";
+import { spawn } from "child_process";
+import { fileURLToPath } from "url";
 import { chromium } from "playwright-core";
 import { launchPersistentBrowser, getStorageStatePath, restoreCookies, getDataDir } from "./browser_launcher.mjs";
 
+const __filename = fileURLToPath(import.meta.url);
+const __dirname = path.dirname(__filename);
+
 const log = (...args) => console.error("[avito-core]", ...args);
 const DATA_DIR = getDataDir();
+
+function getPythonPath() {
+  const candidate = "C:\\Python310\\python.exe";
+  if (fs.existsSync(candidate)) return candidate;
+  return process.env.PYTHON_BIN || "python";
+}
 
 let browserInstance = null;
 let activePage = null;
@@ -560,73 +571,190 @@ export async function listChats({ limit = 10 }) {
   });
 }
 
-export async function getChatHistory({ chat_url, limit = 15 }) {
+export async function getChatHistory({ chat_url, limit = 15, transcribe_voice = true } = {}) {
   const targetUrl = chat_url ? validateAvitoUrl(chat_url) : "https://www.avito.ru/profile/messenger";
 
   return executeWithLock(async () => {
     const page = await getPage();
     log("navigating to chat:", targetUrl);
-    await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-    await ensureNotBlocked(page);
-    await page.waitForTimeout(3000);
 
-    if (await checkNeedsLogin(page)) {
-      throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
-    }
+    // Track audio responses captured from network
+    const audioResponses = new Map();
+    const onResponse = async (resp) => {
+      try {
+        const url = resp.url();
+        const ct = resp.headers()["content-type"] || "";
+        if (ct.includes("audio/") || /\.(ogg|oga|mp3|m4a|wav|opus)(\?|$)/i.test(url)) {
+          const buffer = await resp.body().catch(() => null);
+          if (buffer && buffer.length > 0) {
+            audioResponses.set(url, buffer);
+          }
+        }
+      } catch (_) {}
+    };
+    page.on("response", onResponse);
 
-    // If no specific chat_url was provided, pick the first active conversation from the list
-    if (!chat_url) {
-      const firstChatLink = await page.$eval('a[data-marker*="channels/channelLink"], [data-marker*="channel-item"] a, [class*="channel-item"] a', el => el.getAttribute("href")).catch(() => null);
-      if (firstChatLink) {
-        let fullChatUrl = null;
-        try {
-          fullChatUrl = validateAvitoUrl(new URL(firstChatLink, "https://www.avito.ru").toString());
-        } catch (_) {}
+    try {
+      await page.goto(targetUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+      await ensureNotBlocked(page);
+      await page.waitForTimeout(3000);
 
-        if (fullChatUrl) {
-          log("opening first conversation from list:", fullChatUrl);
-          await page.goto(fullChatUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
-          await ensureNotBlocked(page);
-          await page.waitForTimeout(2500);
+      if (await checkNeedsLogin(page)) {
+        throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
+      }
+
+      // If no specific chat_url was provided, pick the first active conversation from the list
+      if (!chat_url) {
+        const firstChatLink = await page.$eval('a[data-marker*="channels/channelLink"], [data-marker*="channel-item"] a, [class*="channel-item"] a', el => el.getAttribute("href")).catch(() => null);
+        if (firstChatLink) {
+          let fullChatUrl = null;
+          try {
+            fullChatUrl = validateAvitoUrl(new URL(firstChatLink, "https://www.avito.ru").toString());
+          } catch (_) {}
+
+          if (fullChatUrl) {
+            log("opening first conversation from list:", fullChatUrl);
+            await page.goto(fullChatUrl, { waitUntil: "domcontentloaded", timeout: 45000 });
+            await ensureNotBlocked(page);
+            await page.waitForTimeout(2500);
+          }
         }
       }
+
+      // Extract messages and voice audio
+      const rawMessages = await page.$$eval(
+        '[data-marker="message"], [data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]',
+        async (els, max) => {
+          // Filter out nested duplicates: only keep elements that have no other matched element as an ancestor
+          const uniqueEls = els.filter((el) => !els.some((other) => other !== el && other.contains(el)));
+          const targetEls = uniqueEls.slice(-max);
+          const results = [];
+
+          for (const el of targetEls) {
+            const textEl = el.querySelector('[data-marker="messageText"], [data-marker*="message-text"], [class*="messageText"], [class*="message-text"], [class*="text"]') || el;
+            const timeEl = el.querySelector('[data-marker*="message-time"], [data-marker*="time"], [class*="message-time"], [class*="time"]');
+
+            // Strict direction check: use word boundaries or explicit data attributes
+            const className = el.className || "";
+            const isOut =
+              className.includes("right") ||
+              className.includes("message_blue") ||
+              /\b(out|message-out|ChatMessage-module_out)\b/.test(className) ||
+              el.getAttribute("data-is-out") === "true";
+
+            // Detect voice messages
+            const audioTag = el.querySelector("audio, [data-marker*='voice'] audio, [data-marker*='audio'] audio");
+            let audioUrl = audioTag ? (audioTag.currentSrc || audioTag.src || (audioTag.querySelector("source") ? audioTag.querySelector("source").src : null)) : null;
+
+            if (!audioUrl) {
+              const linkEl = el.querySelector("a[href*='.ogg'], a[href*='.wav'], a[href*='.mp3'], a[href*='.m4a'], [data-url*='.ogg'], [data-url*='.wav'], [data-url*='.mp3'], [data-url*='.m4a']");
+              if (linkEl) {
+                audioUrl = linkEl.getAttribute("data-url") || linkEl.href;
+              }
+            }
+
+            if (!audioUrl) {
+              const voiceEl = el.querySelector("[data-marker*='voice'], [data-marker*='audio'], [class*='voice'], [class*='Voice'], [class*='AudioPlayer']");
+              if (voiceEl) {
+                audioUrl = voiceEl.getAttribute("data-src") || voiceEl.getAttribute("data-url") || voiceEl.getAttribute("data-audio-url");
+              }
+            }
+
+            const isVoice = Boolean(audioUrl || el.querySelector("[data-marker*='voice'], [data-marker*='audio'], [class*='voice'], [class*='Voice'], [class*='AudioPlayer']"));
+
+            let audioBase64 = null;
+            if (audioUrl) {
+              try {
+                const resp = await fetch(audioUrl);
+                if (resp.ok) {
+                  const blob = await resp.blob();
+                  audioBase64 = await new Promise((resolve) => {
+                    const reader = new FileReader();
+                    reader.onloadend = () => {
+                      const r = reader.result;
+                      resolve(typeof r === "string" ? r.split(",")[1] : null);
+                    };
+                    reader.onerror = () => resolve(null);
+                    reader.readAsDataURL(blob);
+                  });
+                }
+              } catch (_) {}
+            }
+
+            results.push({
+              sender: isOut ? "me" : "seller",
+              text: textEl ? textEl.innerText.trim() : "",
+              time: timeEl ? timeEl.innerText.trim() : "",
+              is_voice: isVoice,
+              audio_url: audioUrl,
+              audio_base64: audioBase64
+            });
+          }
+          return results;
+        },
+        limit
+      );
+
+      cleanAudioCacheIfNeeded();
+      const audioBaseDir = path.join(DATA_DIR, "audio");
+      if (!fs.existsSync(audioBaseDir)) {
+        fs.mkdirSync(audioBaseDir, { recursive: true });
+      }
+
+      const messages = [];
+      for (let i = 0; i < rawMessages.length; i++) {
+        const msg = rawMessages[i];
+        if (msg.is_voice) {
+          let localAudioFile = null;
+          let audioBuffer = null;
+
+          if (msg.audio_base64) {
+            audioBuffer = Buffer.from(msg.audio_base64, "base64");
+          } else if (msg.audio_url && audioResponses.has(msg.audio_url)) {
+            audioBuffer = audioResponses.get(msg.audio_url);
+          }
+
+          delete msg.audio_base64;
+
+          if (audioBuffer && audioBuffer.length > 0) {
+            const fileName = `voice_${Date.now()}_${i}.ogg`;
+            localAudioFile = path.join(audioBaseDir, fileName);
+            fs.writeFileSync(localAudioFile, audioBuffer);
+            msg.audio_path = localAudioFile.replace(/\\/g, "/");
+          }
+
+          if (transcribe_voice && localAudioFile) {
+            try {
+              const transRes = await transcribeAudio(localAudioFile);
+              if (transRes.text) {
+                msg.voice_transcription = transRes.text;
+                msg.text = msg.text ? `${msg.text}\n[Голосовое: "${transRes.text}"]` : `[Голосовое: "${transRes.text}"]`;
+              } else {
+                msg.text = msg.text ? `${msg.text}\n[Голосовое: <тишина или не распознано>]` : `[Голосовое: <тишина или не распознано>]`;
+              }
+            } catch (err) {
+              log("transcription error:", err.message);
+              msg.transcription_error = err.message;
+              if (!msg.text) msg.text = "[Голосовое сообщение]";
+            }
+          } else if (!msg.text) {
+            msg.text = "[Голосовое сообщение]";
+          }
+        } else {
+          delete msg.audio_base64;
+        }
+        messages.push(msg);
+      }
+
+      return {
+        chat_url: page.url(),
+        title: await page.title(),
+        messages_count: messages.length,
+        messages
+      };
+    } finally {
+      page.off("response", onResponse);
     }
-
-    // Extract messages: deduplicate nested elements and use strict word boundaries for direction
-    const messages = await page.$$eval(
-      '[data-marker="message"], [data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]',
-      (els, max) => {
-        // Filter out nested duplicates: only keep elements that have no other matched element as an ancestor
-        const uniqueEls = els.filter((el) => !els.some((other) => other !== el && other.contains(el)));
-
-        return uniqueEls.slice(-max).map((el) => {
-          const textEl = el.querySelector('[data-marker="messageText"], [data-marker*="message-text"], [class*="messageText"], [class*="message-text"], [class*="text"]') || el;
-          const timeEl = el.querySelector('[data-marker*="message-time"], [data-marker*="time"], [class*="message-time"], [class*="time"]');
-
-          // Strict direction check: use word boundaries or explicit data attributes
-          const className = el.className || "";
-          const isOut =
-            className.includes("right") ||
-            className.includes("message_blue") ||
-            /\b(out|message-out|ChatMessage-module_out)\b/.test(className) ||
-            el.getAttribute("data-is-out") === "true";
-
-          return {
-            sender: isOut ? "me" : "seller",
-            text: textEl ? textEl.innerText.trim() : "",
-            time: timeEl ? timeEl.innerText.trim() : ""
-          };
-        });
-      },
-      limit
-    );
-
-    return {
-      chat_url: page.url(),
-      title: await page.title(),
-      messages_count: messages.length,
-      messages
-    };
   });
 }
 
@@ -646,6 +774,72 @@ function getDirectorySizeBytes(dirPath) {
     }
   } catch (_) {}
   return size;
+}
+
+export function cleanAudioCacheIfNeeded(maxBytes = 512 * 1024 * 1024) {
+  const baseAudioDir = path.join(DATA_DIR, "audio");
+  if (!fs.existsSync(baseAudioDir)) return;
+
+  const currentSize = getDirectorySizeBytes(baseAudioDir);
+  if (currentSize >= maxBytes) {
+    log(`audio cache exceeded limit (${(currentSize / 1024 / 1024).toFixed(1)} MB >= ${(maxBytes / 1024 / 1024).toFixed(1)} MB), clearing cached audio...`);
+    try {
+      fs.rmSync(baseAudioDir, { recursive: true, force: true });
+      fs.mkdirSync(baseAudioDir, { recursive: true });
+      log("audio cache cleared successfully");
+    } catch (err) {
+      log("error clearing audio cache:", err.message);
+    }
+  }
+}
+
+export async function transcribeAudio(audioPath, options = {}) {
+  const pythonPath = getPythonPath();
+  const scriptPath = path.join(__dirname, "transcribe_gigaam.py");
+  const model = options.model || "v2_ctc";
+
+  if (!fs.existsSync(audioPath)) {
+    throw new Error(`Audio file not found: ${audioPath}`);
+  }
+
+  log(`transcribing audio with GigaAM (${model}): ${audioPath}`);
+
+  return new Promise((resolve, reject) => {
+    const proc = spawn(pythonPath, [scriptPath, audioPath, "--model", model], {
+      env: { ...process.env, PYTHONIOENCODING: "utf-8" },
+      windowsHide: true,
+    });
+
+    let stdout = "";
+    let stderr = "";
+
+    proc.stdout.on("data", (chunk) => {
+      stdout += chunk.toString("utf8");
+    });
+    proc.stderr.on("data", (chunk) => {
+      stderr += chunk.toString("utf8");
+    });
+
+    proc.on("error", (err) => {
+      reject(new Error(`Failed to launch python: ${err.message}`));
+    });
+
+    proc.on("close", (code) => {
+      if (code !== 0) {
+        log(`transcribe_gigaam error (code ${code}):`, stderr);
+        return reject(new Error(stderr || `Transcription process exited with code ${code}`));
+      }
+      try {
+        const parsed = JSON.parse(stdout.trim());
+        if (!parsed.success) {
+          return reject(new Error(parsed.error || "Unknown transcription error"));
+        }
+        resolve(parsed);
+      } catch (err) {
+        reject(new Error(`Failed to parse transcription output: ${stdout}`));
+      }
+    });
+  });
 }
 
 export function cleanImageCacheIfNeeded(maxBytes = 1024 * 1024 * 1024) {
