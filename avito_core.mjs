@@ -35,6 +35,8 @@ if (!fs.existsSync(DATA_DIR)) {
 
 let context = null;
 let activePage = null;
+let cdpBrowser = null;
+let isCdp = false;
 let idleTimer = null;
 const IDLE_TIMEOUT_MS = 15 * 60 * 1000;
 let requestLock = Promise.resolve();
@@ -152,6 +154,41 @@ function getLaunchOptions() {
 export async function getBrowserContext() {
   if (context) return context;
   cleanStaleLocks(DATA_DIR);
+
+  // 0. Connect via Chrome DevTools Protocol (CDP) if available
+  // This completely bypasses macOS sandbox restrictions in environments like Gemini Desktop
+  const cdpUrl = process.env.AVITO_CDP_URL || "http://127.0.0.1:9222";
+  let cdpAvailable = false;
+  try {
+    const res = await fetch(`${cdpUrl}/json/version`, { signal: AbortSignal.timeout(1000) });
+    if (res.ok) cdpAvailable = true;
+  } catch (_) {}
+
+  if (cdpAvailable) {
+    try {
+      log(`connecting to browser over CDP at ${cdpUrl}...`);
+      cdpBrowser = await chromium.connectOverCDP(cdpUrl);
+      const contexts = cdpBrowser.contexts();
+      context = contexts.length > 0 ? contexts[0] : await cdpBrowser.newContext({ locale: "ru-RU" });
+      isCdp = true;
+      log("successfully connected over CDP");
+
+      cdpBrowser.on("disconnected", () => {
+        log("CDP browser disconnected");
+        context = null;
+        activePage = null;
+        cdpBrowser = null;
+        isCdp = false;
+      });
+
+      return context;
+    } catch (err) {
+      log("failed connecting over CDP, falling back to local launch:", err.message);
+      cdpBrowser = null;
+      isCdp = false;
+    }
+  }
+
   log("launching persistent browser context...");
   const baseOptions = getLaunchOptions();
   let lastError = null;
@@ -269,6 +306,20 @@ export async function getPage() {
 }
 
 export async function closeBrowser() {
+  if (isCdp) {
+    if (activePage && !activePage.isClosed()) {
+      await activePage.goto("about:blank").catch(() => {});
+    }
+    if (cdpBrowser) {
+      await cdpBrowser.close().catch(() => {});
+    }
+    context = null;
+    activePage = null;
+    cdpBrowser = null;
+    isCdp = false;
+    return;
+  }
+
   if (context) {
     await context.close().catch(() => {});
     context = null;
