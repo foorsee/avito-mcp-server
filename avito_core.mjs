@@ -66,11 +66,11 @@ export async function getBrowserContext() {
         Object.defineProperty(navigator, "webdriver", { get: () => undefined });
       }).catch(() => {});
 
+      const storagePath = getStorageStatePath(DATA_DIR);
       // In CDP mode, Chrome already manages its profile SQLite cookies.
       // Only import from storageState.json if profile currently has no Avito cookies.
       const existingCookies = await ctx.cookies(["https://www.avito.ru"]).catch(() => []);
       if (existingCookies.length === 0) {
-        const storagePath = getStorageStatePath(DATA_DIR);
         await restoreCookies(ctx, storagePath);
       }
 
@@ -116,8 +116,11 @@ export async function getPage() {
 
 export async function closeBrowser() {
   if (isCdp) {
+    if (activePage && !activePage.isClosed()) {
+      await activePage.goto("about:blank").catch(() => {});
+    }
     if (cdpBrowser) {
-      await cdpBrowser.disconnect().catch(() => {});
+      await cdpBrowser.close().catch(() => {});
     }
     browserInstance = null;
     activePage = null;
@@ -460,34 +463,44 @@ export async function listChats({ limit = 10 }) {
       throw new Error("Необходима авторизация в аккаунте Авито! Запустите npm run login для входа.");
     }
 
-    const chats = await page.$$eval('[data-marker*="channel-item"], [class*="channel-item"]', (els, max) => {
-      return els.slice(0, max).map((el) => {
-        const titleEl = el.querySelector('[class*="title"], [data-marker*="title"]');
-        const snippetEl = el.querySelector('[class*="snippet"], [data-marker*="snippet"]');
-        const unreadEl = el.querySelector('[class*="unread"]');
-        const linkEl = el.querySelector("a") || el;
-        let href = linkEl.getAttribute("href") || "";
-        if (href) {
+    const chats = await page.$$eval(
+      'a[data-marker*="channels/channelLink"], [data-marker*="channel-item"], [class*="channel-item"]',
+      (els, max) => {
+        const results = [];
+        const seenUrls = new Set();
+        for (const el of els) {
+          if (results.length >= max) break;
+          const a = el.tagName === "A" ? el : el.querySelector("a") || el.closest("a");
+          let href = a ? a.getAttribute("href") || "" : "";
+          if (!href) continue;
           try {
             const resolved = new URL(href, "https://www.avito.ru");
             if (resolved.protocol === "https:" && (resolved.hostname === "avito.ru" || resolved.hostname.endsWith(".avito.ru"))) {
               href = resolved.toString();
             } else {
-              href = "";
+              continue;
             }
           } catch (_) {
-            href = "";
+            continue;
           }
-        }
+          if (seenUrls.has(href)) continue;
+          seenUrls.add(href);
 
-        return {
-          chat_url: href,
-          title: titleEl ? titleEl.innerText.trim() : "",
-          last_message: snippetEl ? snippetEl.innerText.trim() : "",
-          has_unread: !!unreadEl
-        };
-      });
-    }, limit);
+          const titleEl = el.querySelector('[class*="name"], [data-marker*="title"], [class*="title"]') || el.querySelector("strong, h3");
+          const snippetEl = el.querySelector('[class*="message"], [class*="snippet"], [data-marker*="snippet"], [class*="text"]');
+          const unreadEl = el.querySelector('[class*="unread"], [data-marker*="unread"]');
+
+          results.push({
+            chat_url: href,
+            title: titleEl ? titleEl.innerText.trim() : "",
+            last_message: snippetEl ? snippetEl.innerText.trim() : "",
+            has_unread: !!unreadEl
+          });
+        }
+        return results;
+      },
+      limit
+    );
 
     return {
       count: chats.length,
@@ -512,7 +525,7 @@ export async function getChatHistory({ chat_url, limit = 15 }) {
 
     // If no specific chat_url was provided, pick the first active conversation from the list
     if (!chat_url) {
-      const firstChatLink = await page.$eval('[data-marker*="channel-item"] a, [class*="channel-item"] a', el => el.getAttribute("href")).catch(() => null);
+      const firstChatLink = await page.$eval('a[data-marker*="channels/channelLink"], [data-marker*="channel-item"] a, [class*="channel-item"] a', el => el.getAttribute("href")).catch(() => null);
       if (firstChatLink) {
         let fullChatUrl = null;
         try {
@@ -530,18 +543,20 @@ export async function getChatHistory({ chat_url, limit = 15 }) {
 
     // Extract messages: deduplicate nested elements and use strict word boundaries for direction
     const messages = await page.$$eval(
-      '[data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]',
+      '[data-marker="message"], [data-marker*="message-item"], [class*="message-item"], [class*="ChatMessage"]',
       (els, max) => {
         // Filter out nested duplicates: only keep elements that have no other matched element as an ancestor
         const uniqueEls = els.filter((el) => !els.some((other) => other !== el && other.contains(el)));
 
         return uniqueEls.slice(-max).map((el) => {
-          const textEl = el.querySelector('[data-marker*="message-text"], [class*="message-text"], [class*="text"]') || el;
-          const timeEl = el.querySelector('[data-marker*="message-time"], [class*="message-time"], [class*="time"]');
+          const textEl = el.querySelector('[data-marker="messageText"], [data-marker*="message-text"], [class*="messageText"], [class*="message-text"], [class*="text"]') || el;
+          const timeEl = el.querySelector('[data-marker*="message-time"], [data-marker*="time"], [class*="message-time"], [class*="time"]');
 
           // Strict direction check: use word boundaries or explicit data attributes
           const className = el.className || "";
           const isOut =
+            className.includes("right") ||
+            className.includes("message_blue") ||
             /\b(out|message-out|ChatMessage-module_out)\b/.test(className) ||
             el.getAttribute("data-is-out") === "true";
 
