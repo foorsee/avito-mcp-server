@@ -411,54 +411,63 @@ async def search_avito(
         await ensure_not_blocked(page)
 
         try:
-            await page.wait_for_selector('[data-marker="item"]', timeout=8000)
+            await page.wait_for_selector('[data-marker="item"]', timeout=10000)
         except Exception:
             pass
 
-        items = await page.evaluate(
-            """
-            (limit) => {
-                const els = Array.from(document.querySelectorAll('[data-marker="item"]'));
-                return els.slice(0, limit).map(el => {
-                    const titleEl = el.querySelector('[data-marker="item-title"]');
-                    const priceEl = el.querySelector('[data-marker="item-price"]');
-                    const linkEl = el.querySelector('a[data-marker="item-title"]') || el.querySelector('a');
-                    const descEl = el.querySelector('[class*="description"]');
-                    const geoEl = el.querySelector('[class*="geo"]');
-                    const dateEl = el.querySelector('[data-marker="item-date"]') || el.querySelector('[class*="date"]');
-                    const imgEl = el.querySelector('img[src*="img.avito.st"], img[data-src*="img.avito.st"], img');
+        items = []
+        for attempt in range(3):
+            try:
+                items = await page.evaluate(
+                    """
+                    (limit) => {
+                        const els = Array.from(document.querySelectorAll('[data-marker="item"]'));
+                        return els.slice(0, limit).map(el => {
+                            const titleEl = el.querySelector('[data-marker="item-title"]');
+                            const priceEl = el.querySelector('[data-marker="item-price"]');
+                            const linkEl = el.querySelector('a[data-marker="item-title"]') || el.querySelector('a');
+                            const descEl = el.querySelector('[class*="description"]');
+                            const geoEl = el.querySelector('[class*="geo"]');
+                            const dateEl = el.querySelector('[data-marker="item-date"]') || el.querySelector('[class*="date"]');
+                            const imgEl = el.querySelector('img[src*="img.avito.st"], img[data-src*="img.avito.st"], img');
 
-                    const title = titleEl ? titleEl.innerText.trim() : (linkEl ? (linkEl.getAttribute("title") || "") : "");
-                    const price = priceEl ? priceEl.innerText.trim() : "";
-                    const href = linkEl ? linkEl.getAttribute("href") : "";
-                    const url = href ? (href.startsWith("http") ? href : `https://www.avito.ru${href}`) : "";
-                    const location = geoEl ? geoEl.innerText.trim().replace(/\\s+/g, " ") : "";
-                    const description = descEl ? descEl.innerText.trim() : "";
-                    const date = dateEl ? dateEl.innerText.trim() : "";
+                            const title = titleEl ? titleEl.innerText.trim() : (linkEl ? (linkEl.getAttribute("title") || "") : "");
+                            const price = priceEl ? priceEl.innerText.trim() : "";
+                            const href = linkEl ? linkEl.getAttribute("href") : "";
+                            const url = href ? (href.startsWith("http") ? href : `https://www.avito.ru${href}`) : "";
+                            const location = geoEl ? geoEl.innerText.trim().replace(/\\s+/g, " ") : "";
+                            const description = descEl ? descEl.innerText.trim() : "";
+                            const date = dateEl ? dateEl.innerText.trim() : "";
 
-                    let image = "";
-                    if (imgEl) {
-                        const src = imgEl.currentSrc || imgEl.getAttribute("src") || imgEl.getAttribute("data-src") || "";
-                        if (src && !src.startsWith("data:")) image = src;
+                            let image = "";
+                            if (imgEl) {
+                                const src = imgEl.currentSrc || imgEl.getAttribute("src") || imgEl.getAttribute("data-src") || "";
+                                if (src && !src.startsWith("data:")) image = src;
+                            }
+
+                            const urlMatch = url.match(/_(\\d+)(?:\\?|$)/);
+                            const rawId = el.getAttribute("data-item-id") || (urlMatch ? urlMatch[1] : "") || el.getAttribute("id") || "";
+                            const id = rawId.replace(/^i/, "");
+
+                            const text = el.innerText || "";
+                            const isReserved = text.includes("Товар зарезервирован") || text.includes("Зарезервировано");
+                            const hasDelivery = text.includes("Доставка") || !!el.querySelector('[data-marker*="delivery"]');
+
+                            return {
+                                id, title, price, url, image, location, description, date,
+                                is_reserved: isReserved, has_delivery: hasDelivery
+                            };
+                        });
                     }
-
-                    const urlMatch = url.match(/_(\\d+)(?:\\?|$)/);
-                    const rawId = el.getAttribute("data-item-id") || (urlMatch ? urlMatch[1] : "") || el.getAttribute("id") || "";
-                    const id = rawId.replace(/^i/, "");
-
-                    const text = el.innerText || "";
-                    const isReserved = text.includes("Товар зарезервирован") || text.includes("Зарезервировано");
-                    const hasDelivery = text.includes("Доставка") || !!el.querySelector('[data-marker*="delivery"]');
-
-                    return {
-                        id, title, price, url, image, location, description, date,
-                        is_reserved: isReserved, has_delivery: hasDelivery
-                    };
-                });
-            }
-            """,
-            limit
-        )
+                    """,
+                    limit
+                )
+                break
+            except Exception as e:
+                if ("Execution context was destroyed" in str(e) or "Target closed" in str(e)) and attempt < 2:
+                    await asyncio.sleep(1.0)
+                    continue
+                raise
 
         return {
             "query": query,
