@@ -1,0 +1,16 @@
+services:
+  avito-mcp:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: avito-mcp-server
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    volumes:
+      # Persist cookies, session and cache between restarts
+      - ./avito-data:/app/avito-data
+    environment:
+      - AVITO_HEADLESS=true
+      - AVITO_NO_SANDBOX=true
+      - AVITO_DATA_DIR=/app/avito-data

@@ -22,8 +22,9 @@
 
 ## Требования
 
-- **Node.js** >= 18
-- Установленный браузер: **Google Chrome**, **Microsoft Edge** или **Chromium** (на macOS и Windows находится автоматически; на Linux ищутся стандартные пути в `/usr/bin/` или задаются через переменную).
+- **Python** >= 3.12 (для Python-версии и Docker) ИЛИ **Node.js** >= 18 (для JS-версии)
+- Установленный браузер: **Google Chrome**, **Microsoft Edge** или **Chromium** (на macOS и Windows находится автоматически; на Linux ищутся стандартные пути в `/usr/bin/` или задаются через переменную `AVITO_CHROME_PATH`).
+- Для контейнеризации: **Docker** и **Docker Compose** (поддерживает headless-запуск на серверах).
 
 ---
 
@@ -85,27 +86,88 @@ npm run setup
 
 ---
 
+## 🐍 Использование на Python 3.12+ (Серверы и Production)
+
+Сервер полностью реализован на современном **Python 3.12+** с использованием официального `mcp` SDK и `playwright`. Идеально подходит для развертывания на Linux-серверах и в Docker.
+
+### 1. Установка окружения
+```bash
+# Создание виртуального окружения
+python3 -m venv .venv
+source .venv/bin/activate    # Linux / macOS
+# или для Windows: .venv\Scripts\activate
+
+# Установка зависимостей
+pip install -r requirements.txt
+
+# Установка браузера Chromium для Playwright
+playwright install chromium
+```
+
+### 2. Авторизация на Авито (Python)
+```bash
+python login_avito.py
+```
+Скрипт откроет окно браузера, подождет вашего входа по СМС / пушу / паролю и сохранит сессию в `avito-data/storageState.json`.
+
+---
+
+## 🐳 Развертывание в Docker
+
+Для серверов и VPS подготовлен готовый production `Dockerfile` и `docker-compose.yml`:
+
+```bash
+# 1. Авторизуйтесь локально через python login_avito.py (или скопируйте папку avito-data на сервер)
+# 2. Сборка и запуск контейнера:
+docker compose up --build -d
+
+# Просмотр логов:
+docker compose logs -f
+```
+
+Сессия, куки и кэш сохраняются в томе `./avito-data`, переживая перезапуски контейнеров.
+
+---
+
 ## Настройка MCP клиента
 
 ### Antigravity / Claude Desktop / Cursor
 
 Добавьте сервер в ваш файл конфигурации (`mcp_config.json` или `claude_desktop_config.json`):
 
-#### Windows
+#### Вариант 1: Python 3.12+ (Рекомендуется для Python окружений)
+
+**macOS / Linux:**
 ```json
 {
   "mcpServers": {
     "avito": {
-      "command": "node",
+      "command": "/home/<username>/avito-mcp-server/.venv/bin/python",
       "args": [
-        "C:/Users/<Username>/Documents/avito-mcp-server/avito_server.mjs"
+        "/home/<username>/avito-mcp-server/avito_server.py"
       ]
     }
   }
 }
 ```
 
-#### macOS / Linux
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "avito": {
+      "command": "C:/Users/<Username>/avito-mcp-server/.venv/Scripts/python.exe",
+      "args": [
+        "C:/Users/<Username>/avito-mcp-server/avito_server.py"
+      ]
+    }
+  }
+}
+```
+
+#### Вариант 2: Node.js
+
+**macOS / Linux:**
 ```json
 {
   "mcpServers": {
@@ -113,6 +175,20 @@ npm run setup
       "command": "node",
       "args": [
         "/home/<username>/avito-mcp-server/avito_server.mjs"
+      ]
+    }
+  }
+}
+```
+
+**Windows:**
+```json
+{
+  "mcpServers": {
+    "avito": {
+      "command": "node",
+      "args": [
+        "C:/Users/<Username>/Documents/avito-mcp-server/avito_server.mjs"
       ]
     }
   }
