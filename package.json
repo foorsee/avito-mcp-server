@@ -10,6 +10,7 @@
   "scripts": {
     "start": "node avito_server.mjs",
     "login": "node login_avito.js",
+    "setup": "node scripts/setup.mjs",
     "cdp": "node scripts/run_cdp.mjs",
     "solve": "node scripts/solve_captcha.mjs",
     "daemon:install": "node scripts/setup_daemon.mjs",

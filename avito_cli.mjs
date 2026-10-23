@@ -40,8 +40,9 @@ async function run() {
     } else if (cmd === "transcribe") {
       const audioPath = args[0];
       if (!audioPath) throw new Error("Укажите путь к аудиофайлу");
-      const model = args[1] || "v2_ctc";
-      const res = await transcribeAudio(audioPath, { model });
+      const engine = args[1] || "auto";
+      const model = args[2] || undefined;
+      const res = await transcribeAudio(audioPath, { engine, model });
       console.log(JSON.stringify(res, null, 2));
     } else {
       console.log("Использование:");
@@ -50,7 +51,7 @@ async function run() {
       console.log("  node avito_cli.mjs images <url> [limit]");
       console.log("  node avito_cli.mjs chats");
       console.log("  node avito_cli.mjs history [chat_url]");
-      console.log("  node avito_cli.mjs transcribe <audio_path> [model]");
+      console.log("  node avito_cli.mjs transcribe <audio_path> [engine: auto|sber|whisper] [model]");
       console.log("  node avito_cli.mjs send <url> <сообщение>");
     }
   } catch (err) {

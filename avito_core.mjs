@@ -1,5 +1,6 @@
 import fs from "fs";
 import path from "path";
+import os from "os";
 import { spawn } from "child_process";
 import { fileURLToPath } from "url";
 import { chromium } from "playwright-core";
@@ -10,6 +11,32 @@ const __dirname = path.dirname(__filename);
 
 const log = (...args) => console.error("[avito-core]", ...args);
 const DATA_DIR = getDataDir();
+
+export function getConfig() {
+  const configPath = path.join(DATA_DIR, "config.json");
+  let fileConfig = {};
+  if (fs.existsSync(configPath)) {
+    try {
+      fileConfig = JSON.parse(fs.readFileSync(configPath, "utf-8"));
+    } catch (_) {}
+  }
+  return {
+    stt_engine: process.env.AVITO_STT_ENGINE || fileConfig.stt_engine || "auto",
+    groq_api_key: process.env.GROQ_API_KEY || fileConfig.groq_api_key || "",
+    openai_api_key: process.env.OPENAI_API_KEY || fileConfig.openai_api_key || "",
+    sber_model: process.env.AVITO_SBER_MODEL || fileConfig.sber_model || "v2_ctc",
+    whisper_model: process.env.AVITO_WHISPER_MODEL || fileConfig.whisper_model || "whisper-large-v3-turbo",
+    stt_force: process.env.AVITO_STT_FORCE === "true" || fileConfig.stt_force === true
+  };
+}
+
+export function saveConfig(updates = {}) {
+  const configPath = path.join(DATA_DIR, "config.json");
+  const current = getConfig();
+  const merged = { ...current, ...updates };
+  fs.writeFileSync(configPath, JSON.stringify(merged, null, 2), "utf-8");
+  return merged;
+}
 
 function getPythonPath() {
   const candidate = "C:\\Python310\\python.exe";
@@ -726,9 +753,12 @@ export async function getChatHistory({ chat_url, limit = 15, transcribe_voice = 
           if (transcribe_voice && localAudioFile) {
             try {
               const transRes = await transcribeAudio(localAudioFile);
-              if (transRes.text) {
+              if (transRes && transRes.text) {
                 msg.voice_transcription = transRes.text;
+                msg.voice_engine = transRes.engine || "unknown";
                 msg.text = msg.text ? `${msg.text}\n[Голосовое: "${transRes.text}"]` : `[Голосовое: "${transRes.text}"]`;
+              } else if (transRes && transRes.skipped) {
+                if (!msg.text) msg.text = "[Голосовое сообщение]";
               } else {
                 msg.text = msg.text ? `${msg.text}\n[Голосовое: <тишина или не распознано>]` : `[Голосовое: <тишина или не распознано>]`;
               }
@@ -793,16 +823,26 @@ export function cleanAudioCacheIfNeeded(maxBytes = 512 * 1024 * 1024) {
   }
 }
 
-export async function transcribeAudio(audioPath, options = {}) {
+export async function transcribeSber(audioPath, options = {}) {
+  const config = getConfig();
+  const totalRamGb = os.totalmem() / 1024 / 1024 / 1024;
+  const isLowMemory = totalRamGb < 3.5;
+
+  if (isLowMemory && !config.stt_force && !options.force) {
+    throw new Error(
+      `На сервере всего ${totalRamGb.toFixed(1)} ГБ ОЗУ. Локальный Сбер GigaAM требует от 4 ГБ ОЗУ, иначе процесс на слабой VPS упадет в Out-Of-Memory. Используйте Whisper (бесплатный Groq API) или укажите AVITO_STT_FORCE=true для принудительного старта.`
+    );
+  }
+
   const pythonPath = getPythonPath();
   const scriptPath = path.join(__dirname, "transcribe_gigaam.py");
-  const model = options.model || "v2_ctc";
+  const model = options.model || config.sber_model || "v2_ctc";
 
   if (!fs.existsSync(audioPath)) {
     throw new Error(`Audio file not found: ${audioPath}`);
   }
 
-  log(`transcribing audio with GigaAM (${model}): ${audioPath}`);
+  log(`transcribing audio with Sber GigaAM (${model}): ${audioPath}`);
 
   return new Promise((resolve, reject) => {
     const proc = spawn(pythonPath, [scriptPath, audioPath, "--model", model], {
@@ -834,12 +874,131 @@ export async function transcribeAudio(audioPath, options = {}) {
         if (!parsed.success) {
           return reject(new Error(parsed.error || "Unknown transcription error"));
         }
-        resolve(parsed);
+        resolve({
+          ...parsed,
+          engine: "sber"
+        });
       } catch (err) {
         reject(new Error(`Failed to parse transcription output: ${stdout}`));
       }
     });
   });
+}
+
+export async function transcribeWhisper(audioPath, options = {}) {
+  const config = getConfig();
+  const groqKey = options.groq_api_key || config.groq_api_key;
+  const openaiKey = options.openai_api_key || config.openai_api_key;
+  const model = options.model || (groqKey ? config.whisper_model : "whisper-1");
+
+  if (!fs.existsSync(audioPath)) {
+    throw new Error(`Audio file not found: ${audioPath}`);
+  }
+
+  const audioBytes = fs.readFileSync(audioPath);
+  const ext = path.extname(audioPath).replace(".", "") || "ogg";
+  const filename = path.basename(audioPath) || `voice.${ext}`;
+
+  if (groqKey) {
+    log(`transcribing audio with Groq Whisper API (${model}): ${audioPath}`);
+    const formData = new FormData();
+    const blob = new Blob([audioBytes], { type: `audio/${ext}` });
+    formData.append("file", blob, filename);
+    formData.append("model", model);
+    formData.append("language", "ru");
+
+    const resp = await fetch("https://api.groq.com/openai/v1/audio/transcriptions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${groqKey}`
+      },
+      body: formData
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => resp.statusText);
+      throw new Error(`Groq Whisper API error (${resp.status}): ${errText}`);
+    }
+
+    const data = await resp.json();
+    return {
+      success: true,
+      text: (data.text || "").trim(),
+      engine: "whisper",
+      provider: "groq",
+      model,
+      file: audioPath
+    };
+  }
+
+  if (openaiKey) {
+    log(`transcribing audio with OpenAI Whisper API (${model}): ${audioPath}`);
+    const formData = new FormData();
+    const blob = new Blob([audioBytes], { type: `audio/${ext}` });
+    formData.append("file", blob, filename);
+    formData.append("model", "whisper-1");
+    formData.append("language", "ru");
+
+    const resp = await fetch("https://api.openai.com/v1/audio/transcriptions", {
+      method: "POST",
+      headers: {
+        Authorization: `Bearer ${openaiKey}`
+      },
+      body: formData
+    });
+
+    if (!resp.ok) {
+      const errText = await resp.text().catch(() => resp.statusText);
+      throw new Error(`OpenAI Whisper API error (${resp.status}): ${errText}`);
+    }
+
+    const data = await resp.json();
+    return {
+      success: true,
+      text: (data.text || "").trim(),
+      engine: "whisper",
+      provider: "openai",
+      model: "whisper-1",
+      file: audioPath
+    };
+  }
+
+  throw new Error(
+    "Для распознавания Whisper на VPS нужен бесплатный GROQ_API_KEY (выдается бесплатно за 1 минуту на console.groq.com) или OPENAI_API_KEY. Либо переключитесь на Sber (AVITO_STT_ENGINE=sber)."
+  );
+}
+
+export async function transcribeAudio(audioPath, options = {}) {
+  const config = getConfig();
+  let engine = (options.engine || config.stt_engine || "auto").toLowerCase();
+
+  if (engine === "off" || engine === "none" || engine === "disabled") {
+    return { success: false, text: "", skipped: true, reason: "stt_disabled" };
+  }
+
+  if (engine === "auto") {
+    if (config.groq_api_key || config.openai_api_key || options.groq_api_key || options.openai_api_key) {
+      engine = "whisper";
+    } else {
+      const totalRamGb = os.totalmem() / 1024 / 1024 / 1024;
+      if (totalRamGb >= 3.5) {
+        engine = "sber";
+      } else {
+        log(`[avito-core] system has only ${totalRamGb.toFixed(1)} GB RAM and no GROQ_API_KEY set. Skipping voice transcription to protect VPS from OOM crash.`);
+        return { success: false, text: "", skipped: true, reason: "low_memory_no_key" };
+      }
+    }
+  }
+
+  if (engine === "whisper") {
+    return transcribeWhisper(audioPath, options);
+  }
+
+  if (engine === "sber" || engine === "gigaam") {
+    return transcribeSber(audioPath, options);
+  }
+
+  throw new Error(`Unknown STT engine: '${engine}'. Use 'sber', 'whisper', 'auto', or 'off'.`);
 }
 
 export function cleanImageCacheIfNeeded(maxBytes = 1024 * 1024 * 1024) {

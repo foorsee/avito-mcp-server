@@ -122,14 +122,15 @@ server.registerTool(
 server.registerTool(
   "avito_transcribe_audio",
   {
-    title: "Transcribe voice message or audio with Sber GigaAM",
-    description: "Transcribes an audio file (voice message, WAV, OGG, MP3, etc.) using Sber GigaAM Russian ASR model.",
+    title: "Transcribe voice message or audio with Sber or Whisper",
+    description: "Transcribes an audio file (voice message, WAV, OGG, MP3, etc.) using Sber GigaAM (local GPU/CPU) or Whisper (free Groq cloud API or OpenAI). Supports VPS low-RAM safeguard.",
     inputSchema: {
       audio_path: z.string().describe("Absolute or relative path to the audio file"),
-      model: z.string().default("v2_ctc").describe("GigaAM model: v2_ctc (recommended fast/accurate), v3_ctc, etc.")
+      engine: z.enum(["auto", "sber", "whisper", "off"]).default("auto").describe("STT engine: 'sber' (local GigaAM), 'whisper' (cloud Groq/OpenAI), 'auto', or 'off'"),
+      model: z.string().optional().describe("Optional model override (e.g. 'v2_ctc' for Sber, 'whisper-large-v3-turbo' for Whisper)")
     }
   },
-  wrapTool("avito_transcribe_audio", ({ audio_path, model }) => transcribeAudio(audio_path, { model }))
+  wrapTool("avito_transcribe_audio", ({ audio_path, engine, model }) => transcribeAudio(audio_path, { engine, model }))
 );
 
 
