@@ -515,7 +515,7 @@ async def get_item_details(url: str) -> Dict[str, Any]:
                 const bodyText = document.body ? document.body.innerText : "";
                 const isReserved = bodyText.includes("Товар зарезервирован") || bodyText.includes("Зарезервировано");
                 const hasDelivery = bodyText.includes("Купить с доставкой") || bodyText.includes("Авито Доставка") || !!document.querySelector('[data-marker*="delivery"]');
-                const hasMessageBtn = !!document.querySelector('[data-marker*="messenger-button"], button:has-text("Написать"), a:has-text("Написать")');
+                const hasMessageBtn = !!document.querySelector('[data-marker*="messenger-button"]') || Array.from(document.querySelectorAll('button, a')).some(b => (b.innerText || '').includes('Написать'));
 
                 return {
                     title: titleEl ? titleEl.innerText.trim() : document.title,
