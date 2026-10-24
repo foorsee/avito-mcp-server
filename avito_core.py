@@ -343,7 +343,7 @@ async def ensure_not_blocked(page: Page, max_wait_sec: float = 15.0):
     title = await page.title() or ""
     raise RuntimeError(
         f"Антибот Авито: доступ ограничен ({title}). "
-        "Запустите решение капчи через 'python login_avito.py' / 'npm run solve', либо смените IP."
+        "Запустите решение капчи через 'python scripts/solve_captcha.py' (или 'python login_avito.py'), либо смените IP."
     )
 
 
@@ -464,8 +464,12 @@ async def search_avito(
                 )
                 break
             except Exception as e:
-                if ("Execution context was destroyed" in str(e) or "Target closed" in str(e)) and attempt < 2:
-                    await asyncio.sleep(1.0)
+                err_msg = str(e)
+                if "Execution context was destroyed" in err_msg and attempt < 2:
+                    try:
+                        await page.wait_for_load_state("domcontentloaded", timeout=5000)
+                    except Exception:
+                        await asyncio.sleep(1.0)
                     continue
                 raise
 

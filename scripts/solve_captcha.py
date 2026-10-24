@@ -8,6 +8,7 @@ import asyncio
 import os
 import subprocess
 import sys
+import threading
 from pathlib import Path
 
 ROOT_DIR = Path(__file__).resolve().parent.parent
@@ -38,7 +39,12 @@ async def main():
 
     # Kill stray Chrome processes using avito-data
     try:
-        subprocess.run(["pkill", "-f", "Google Chrome.*avito-data"], capture_output=True)
+        if sys.platform == "darwin":
+            subprocess.run(["pkill", "-f", "(Google Chrome|Chromium).*avito-data"], capture_output=True)
+        elif sys.platform == "linux":
+            subprocess.run(["pkill", "-f", "(chrome|chromium).*avito-data"], capture_output=True)
+        elif sys.platform == "win32":
+            subprocess.run(["taskkill", "/F", "/IM", "chrome.exe"], capture_output=True)
     except Exception:
         pass
 
@@ -106,48 +112,44 @@ async def main():
 
         resolved = False
 
-        async def check_auto():
+        def wait_enter_worker():
             nonlocal resolved
-            while not resolved:
-                await asyncio.sleep(1.5)
-                if resolved:
+            try:
+                input("Нажмите [ENTER] после решения капчи: ")
+                resolved = True
+            except Exception:
+                pass
+
+        threading.Thread(target=wait_enter_worker, daemon=True).start()
+
+        while not resolved:
+            await asyncio.sleep(1.5)
+            if resolved:
+                break
+            try:
+                title = (await page.title() or "").strip()
+                title_lower = title.lower()
+                body_lower = (await page.inner_text("body") or "").lower()
+                is_blocked = (
+                    "доступ ограничен" in title_lower
+                    or "проблема с ip" in title_lower
+                    or "проверка безопасности" in title_lower
+                    or "доступ ограничен: проблема с ip" in body_lower
+                    or "доступ ограничен: проверка безопасности" in body_lower
+                )
+                is_avito = "авито" in title_lower or "avito" in title_lower
+                if not is_blocked and is_avito:
+                    print(f"\n🎉 Капча успешно пройдена! Заголовок страницы: '{title}'")
+                    resolved = True
                     break
-                try:
-                    title = await page.title()
-                    body = await page.inner_text("body")
-                    is_blocked = (
-                        "Доступ ограничен" in title
-                        or "проблема с IP" in title
-                        or "проверка безопасности" in title
-                        or "Доступ ограничен: проблема с IP" in body
-                    )
-                    if not is_blocked and title:
-                        print(f"\n🎉 Капча успешно пройдена! Заголовок страницы: '{title}'")
-                        resolved = True
-                        break
-                except Exception:
-                    pass
+            except Exception:
+                pass
 
-        loop = asyncio.get_event_loop()
-
-        async def wait_enter():
-            nonlocal resolved
-            await loop.run_in_executor(None, input, "Нажмите [ENTER] после решения капчи: ")
-            resolved = True
-
-        auto_task = asyncio.create_task(check_auto())
-        enter_task = asyncio.create_task(wait_enter())
-
-        done, pending = await asyncio.wait(
-            [auto_task, enter_task],
-            return_when=asyncio.FIRST_COMPLETED
-        )
-        for t in pending:
-            t.cancel()
-
+        saved = False
         print("Сохраняем сессию и cookies...")
         try:
             await context.storage_state(path=str(STORAGE_STATE_PATH))
+            saved = True
         except Exception as e:
             print(f"Ошибка сохранения storage_state: {e}")
 
@@ -163,7 +165,10 @@ async def main():
             print(f"Не удалось перезапустить демон: {e}")
 
     print("=" * 70)
-    print("✅ УСПЕХ! Блокировка снята, куки обновлены. MCP готов к работе.")
+    if saved:
+        print("✅ УСПЕХ! Блокировка снята, куки обновлены. MCP готов к работе.")
+    else:
+        print("⚠️ ВНИМАНИЕ: Капча пройдена, но куки сохранить не удалось.")
     print("=" * 70)
 
 

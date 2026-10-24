@@ -20,7 +20,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
     libdrm2 \
     libxkbcommon0 \
     libgbm1 \
-    libasound2t64 || libasound2 \
+    libasound2 \
     libxcomposite1 \
     libxdamage1 \
     libxrandr2 \
@@ -35,8 +35,9 @@ RUN pip install --no-cache-dir -r requirements.txt
 # Install Playwright browser binaries with OS dependencies
 RUN playwright install chromium --with-deps
 
-# Copy application source code
-COPY avito_core.py avito_server.py login_avito.py ./
+# Copy application source code and scripts
+COPY avito_core.py avito_server.py login_avito.py transcribe_gigaam.py ./
+COPY scripts/ ./scripts/
 
 # Create data directory for persistent session and cookies
 RUN mkdir -p /app/avito-data

@@ -59,20 +59,25 @@ def main():
     if force_headless:
         args.append("--headless=new")
     else:
-        args.extend(["--window-position=-3000,-3000", "--window-size=1280,800"])
+        args.append("--window-size=1280,800")
 
     print(f"[avito-cdp] Запуск Chrome на порту {port}...")
     print(f"[avito-cdp] Бинарник: {chrome_path}")
     print(f"[avito-cdp] Папка профиля: {DATA_DIR}")
 
+    proc = None
     try:
         proc = subprocess.Popen(args)
         proc.wait()
     except (KeyboardInterrupt, SystemExit):
-        try:
-            proc.terminate()
-        except Exception:
-            pass
+        if proc:
+            try:
+                proc.terminate()
+            except Exception:
+                pass
+    except Exception as e:
+        print(f"[avito-cdp] Ошибка запуска процесса Chrome: {e}", file=sys.stderr)
+        sys.exit(1)
 
 
 if __name__ == "__main__":
