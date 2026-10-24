@@ -517,11 +517,15 @@ async def get_item_details(url: str) -> Dict[str, Any]:
                 const hasDelivery = bodyText.includes("Купить с доставкой") || bodyText.includes("Авито Доставка") || !!document.querySelector('[data-marker*="delivery"]');
                 const hasMessageBtn = !!document.querySelector('[data-marker*="messenger-button"]') || Array.from(document.querySelectorAll('button, a')).some(b => (b.innerText || '').includes('Написать'));
 
+                const imgEls = document.querySelectorAll('[data-marker*="image-frame"] img, [data-marker*="gallery"] img, img[src*="img.avito.st"]');
+                const images = Array.from(new Set(Array.from(imgEls).map(img => img.currentSrc || img.getAttribute("src") || "").filter(s => s && !s.startsWith("data:"))));
+
                 return {
                     title: titleEl ? titleEl.innerText.trim() : document.title,
                     price: priceEl ? priceEl.innerText.trim() : "",
                     description: descEl ? descEl.innerText.trim() : "",
                     address: addressEl ? addressEl.innerText.trim() : "",
+                    images,
                     params,
                     is_reserved: isReserved,
                     has_delivery: hasDelivery,
