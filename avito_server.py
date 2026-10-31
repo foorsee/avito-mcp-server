@@ -10,7 +10,7 @@ import json
 import logging
 import signal
 import sys
-from typing import Any, Dict, Literal, Optional
+from typing import Any, Dict, List, Literal, Optional
 
 # Support both mcp 2.x (MCPServer) and mcp 1.x (FastMCP)
 try:
@@ -22,6 +22,7 @@ except (ImportError, ModuleNotFoundError):
 
 from avito_core import (
     close_browser,
+    create_item,
     get_chat_history,
     get_item_details,
     list_chats,
@@ -114,6 +115,41 @@ async def tool_get_chat_history(chat_url: Optional[str] = None, limit: int = 15)
         return json.dumps(res, ensure_ascii=False, indent=2)
     except Exception as e:
         log.error("avito_get_chat_history error: %s", e)
+        return json.dumps({"error": str(e)}, ensure_ascii=False)
+
+
+
+@server.tool(
+    name="avito_create_item",
+    description="Create and publish a new listing / ad on Avito with title, description, price, photos, and optional category/brand/model parameters."
+)
+async def tool_create_item(
+    title: str,
+    description: str,
+    price: int,
+    photos: Optional[List[str]] = None,
+    category: str = "Электроника",
+    brand: Optional[str] = None,
+    model: Optional[str] = None,
+    address: Optional[str] = None,
+    condition: str = "Б/у"
+) -> str:
+    """Publish a new listing on Avito."""
+    try:
+        res = await create_item(
+            title=title,
+            description=description,
+            price=price,
+            photos=photos,
+            category=category,
+            brand=brand,
+            model=model,
+            address=address,
+            condition=condition
+        )
+        return json.dumps(res, ensure_ascii=False, indent=2)
+    except Exception as e:
+        log.error("avito_create_item error: %s", e)
         return json.dumps({"error": str(e)}, ensure_ascii=False)
 
 

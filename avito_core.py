@@ -738,3 +738,151 @@ async def send_message(url: str, message: str) -> Dict[str, Any]:
             "chat_url": page.url,
             "sent_message": message
         }
+
+
+async def create_item(
+    title: str,
+    description: str,
+    price: int,
+    photos: Optional[List[str]] = None,
+    category: str = "Электроника",
+    brand: Optional[str] = None,
+    model: Optional[str] = None,
+    address: Optional[str] = None,
+    condition: str = "Б/у"
+) -> Dict[str, Any]:
+    """Publish a new listing on Avito using Playwright automation."""
+    async with _lock:
+        page = await get_page()
+        log.info("Opening https://www.avito.ru/additem...")
+        await page.goto("https://www.avito.ru/additem", wait_until="domcontentloaded", timeout=30000)
+        await asyncio.sleep(2)
+        await ensure_not_blocked(page)
+
+        if "/login" in page.url or "#login" in page.url:
+            raise RuntimeError("Необходима авторизация в аккаунте Авито! Запустите 'python login_avito.py'.")
+
+        # 1. Base category button
+        cat_btn = page.get_by_role("button", name=category)
+        if await cat_btn.count() > 0 and await cat_btn.is_visible():
+            await cat_btn.click()
+            await asyncio.sleep(2)
+
+        # 2. Title
+        title_in = page.locator("input[data-marker='title-field-23/input'], input[name='title']")
+        await title_in.click()
+        await title_in.type(title, delay=35)
+        await asyncio.sleep(1)
+
+        # 3. Handle suggestion & subcategory if present
+        suggs = page.locator("[data-marker*='suggest'], [data-marker='category-title']")
+        try:
+            await suggs.first.wait_for(state="visible", timeout=6000)
+            sub_sugg = page.locator("button[data-marker*='suggest']").first
+            if await sub_sugg.count() > 0 and await sub_sugg.is_visible():
+                await sub_sugg.click()
+                await asyncio.sleep(1)
+
+            subcat = page.locator("[data-marker='category-title']").first
+            if await subcat.count() > 0 and await subcat.is_visible():
+                await subcat.click()
+                await asyncio.sleep(2)
+        except Exception:
+            pass
+
+        # 4. Condition (Новое / Б/у)
+        if condition:
+            c_btn = page.locator(f"label:has-text('{condition}')")
+            if await c_btn.count() > 0 and await c_btn.first.is_visible():
+                await c_btn.first.click()
+                await asyncio.sleep(0.5)
+
+        # 5. Type of trade (Продаю своё)
+        tot_box = page.locator("[data-marker='type_of_trade']")
+        if await tot_box.count() > 0 and await tot_box.is_visible():
+            await tot_box.click()
+            await asyncio.sleep(0.5)
+            opt = page.locator("[data-marker*='type_of_trade/custom-option(20020)'], [data-marker*='type_of_trade/custom-option']").first
+            if await opt.count() > 0 and await opt.is_visible():
+                await opt.click()
+                await asyncio.sleep(0.5)
+
+        # 6. Brand (if provided)
+        if brand:
+            brand_in = page.locator("input[data-marker='brend/search-input']")
+            if await brand_in.count() > 0 and await brand_in.is_visible():
+                await brand_in.click()
+                await brand_in.type(brand, delay=40)
+                await asyncio.sleep(0.5)
+                b_opt = page.locator("[data-marker*='brend/custom-option']").first
+                if await b_opt.count() > 0 and await b_opt.is_visible():
+                    await b_opt.click()
+                    await asyncio.sleep(0.5)
+
+        # 7. Model (if provided)
+        if model:
+            model_in = page.locator("input[data-marker='model/search-input']")
+            if await model_in.count() > 0 and await model_in.is_visible():
+                await model_in.click()
+                await model_in.type(model, delay=40)
+                await asyncio.sleep(0.5)
+                m_opt = page.locator("[data-marker*='model/custom-option']").first
+                if await m_opt.count() > 0 and await m_opt.is_visible():
+                    await m_opt.click()
+                    await asyncio.sleep(0.5)
+
+        # 8. Photos
+        if photos:
+            file_in = page.locator("input[type='file'][data-marker='add/input'], input[type='file']").first
+            if await file_in.count() > 0:
+                valid_photos = [str(Path(p).resolve()) for p in photos if Path(p).exists()]
+                if valid_photos:
+                    await file_in.set_input_files(valid_photos)
+                    await asyncio.sleep(min(3 + len(valid_photos) * 1.5, 12))
+
+        # 9. Description
+        desc_in = page.locator("textarea[name='description'], [data-marker='description/input']")
+        await desc_in.wait_for(state="visible", timeout=8000)
+        await desc_in.fill(description)
+        await asyncio.sleep(1)
+
+        # 10. Price
+        price_in = page.locator("input[data-marker='price'], input[data-marker='price/input']")
+        await price_in.wait_for(state="visible", timeout=8000)
+        await price_in.fill(str(price))
+        await asyncio.sleep(1)
+
+        # 11. Address
+        geo_in = page.locator("input[data-marker='geo/search-input']")
+        if await geo_in.count() > 0 and await geo_in.is_visible():
+            await geo_in.click()
+            await asyncio.sleep(1)
+            if address:
+                await geo_in.fill(address)
+                await asyncio.sleep(1)
+            addr_opt = page.locator("[data-marker*='suggest'], [role='option'], text='Из вашего профиля'").first
+            if await addr_opt.count() > 0 and await addr_opt.is_visible():
+                await addr_opt.click()
+                await asyncio.sleep(1)
+
+        # 12. Submit button
+        submit_btn = page.locator("[data-marker='item-edit/button-next']")
+        await submit_btn.wait_for(state="visible", timeout=8000)
+        await submit_btn.click()
+        await asyncio.sleep(6)
+
+        # 13. Skip promotion if offered
+        skip_btn = page.locator("button:has-text('Пропустить'), a:has-text('Пропустить'), [data-marker*='skip']")
+        if await skip_btn.count() > 0 and await skip_btn.first.is_visible():
+            await skip_btn.first.click()
+            await asyncio.sleep(3)
+
+        current_url = page.url
+        log.info("Listing published or saved: %s", current_url)
+
+        return {
+            "status": "success",
+            "url": current_url,
+            "title": title,
+            "price": price
+        }
