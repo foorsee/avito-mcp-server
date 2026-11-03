@@ -8,6 +8,23 @@ cookies to avito-data/storageState.json.
 import asyncio
 import os
 import sys
+
+# Auto-reexec with local .venv or Homebrew python if playwright is missing in current python
+try:
+    import playwright  # noqa: F401
+except (ImportError, ModuleNotFoundError):
+    server_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(server_dir, ".venv", "bin", "python"),
+        os.path.join(server_dir, ".venv", "bin", "python3"),
+        "/opt/homebrew/bin/python3",
+    ]
+    cur_exe = os.path.realpath(sys.executable)
+    for cand in candidates:
+        if os.path.exists(cand) and os.path.realpath(cand) != cur_exe:
+            os.execv(cand, [cand] + sys.argv)
+    raise
+
 from pathlib import Path
 
 from avito_core import DATA_DIR, DEFAULT_USER_AGENT, STORAGE_STATE_PATH, find_system_chrome

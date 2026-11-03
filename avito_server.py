@@ -5,11 +5,30 @@ Provides tools for searching listings, viewing item details, messaging sellers,
 and checking chat history.
 """
 
+import os
+import sys
+
+# Auto-reexec with local .venv or Homebrew python if current python lacks 'mcp'
+try:
+    import mcp  # noqa: F401
+except (ImportError, ModuleNotFoundError):
+    server_dir = os.path.dirname(os.path.abspath(__file__))
+    candidates = [
+        os.path.join(server_dir, ".venv", "bin", "python"),
+        os.path.join(server_dir, ".venv", "bin", "python3"),
+        "/opt/homebrew/bin/python3",
+    ]
+    cur_exe = os.path.realpath(sys.executable)
+    for cand in candidates:
+        if os.path.exists(cand) and os.path.realpath(cand) != cur_exe:
+            os.execv(cand, [cand] + sys.argv)
+    # If no suitable interpreter was found, let the import error proceed
+    raise
+
 import asyncio
 import json
 import logging
 import signal
-import sys
 from typing import Any, Dict, List, Literal, Optional
 
 # Support both mcp 2.x (MCPServer) and mcp 1.x (FastMCP)
